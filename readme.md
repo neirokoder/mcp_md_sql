@@ -115,7 +115,17 @@ tests/
 ├── test_reconstructor.py   # 23 теста реконструктора (+ frontmatter)
 ├── test_integration.py     # 15 интеграционных тестов (+ integrity check)
 ├── test_select_queries.py  # 47 тестов (SELECT + валидация + config + timeout + FS errors)
-└── test_watcher.py         # 4 теста файлового вотчера
+├── test_watcher.py         # 4 теста файлового вотчера
+├── test_server.py          # 11 тестов серверного слоя (_handle_call_tool dispatch)
+├── test_scenarios.py       # 20 сценариев реальной работы (SELECT/INSERT/UPDATE/DELETE chains)
+└── fixtures/
+    ├── test_basic.md       # Базовый фикстур
+    └── complex/            # 5 сложных .md документов для 20 сценариев
+        ├── api_docs.md
+        ├── configuration_guide.md
+        ├── technical_spec.md
+        ├── tutorial_quickstart.md
+        └── deployment_guide.md
 ```
 
 ## Запуск тестов

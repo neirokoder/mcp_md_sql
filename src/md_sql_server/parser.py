@@ -531,19 +531,22 @@ def _find_line_positions(source: str, elements: list[ParsedElement]) -> None:
     """Assign line_start/line_end by scanning source lines.
 
     Uses cursor-based scanning: walks source lines in order,
-    matching each top-level element to its line range.
+    matching each top-level element (and list_items at any depth)
+    to its line range.
     Elements with pre-set line_start (e.g. frontmatter) are
     skipped and advance the cursor.
-    Nested elements (depth > 0) remain unassigned — they
-    share their parent's line range.
+    Other nested elements (strong, emphasis, inline_code, etc.)
+    remain unassigned — they share their parent's line range.
     """
     source_lines = source.splitlines()
     cursor = 0
 
-    # Only assign lines to top-level elements
-    top_level = [el for el in elements if el.depth == 0]
+    # Assign lines to all list_items (any depth) and top-level elements.
+    # Nested list_items occupy their own source lines and need line_start/line_end
+    # for correct block-level operations (DELETE, UPDATE line patching).
+    targets = [el for el in elements if el.depth == 0 or el.type == 'list_item']
 
-    for el in top_level:
+    for el in targets:
         if el.line_start is not None:
             # Element already has line positions (e.g. frontmatter)
             cursor = el.line_end if el.line_end else cursor
