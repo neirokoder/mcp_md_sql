@@ -19,6 +19,33 @@ from .descriptions import MD_SELECT_DESCRIPTION, MD_CHANGE_DESCRIPTION
 from .tools import md_select, md_change, ToolError
 from .watcher import FileWatcher
 
+
+
+def _format_select_result(rows: list[dict]) -> str:
+    """Format md_select result as plain text for AI."""
+    out: list[str] = []
+    for r in rows:
+        root = r.get('root') or ''
+        file_ = r.get('file', '')
+        root_prefix = f'{root}/\n' if root else ''
+
+        parts = [f'line: {r.get("line_start", "?")}-{r.get("line_end", "?")}',
+                 f'pos: {r.get("pos_in_file", "?")}']
+        parent = r.get('parent_pos')
+        if parent is not None:
+            parts.append(f'parent: {parent}')
+        depth = r.get('depth')
+        if depth:
+            parts.append(f'depth: {depth}')
+        parts.append(f'type: {r.get("type", "?")}')
+
+        meta = f'{root_prefix}{file_} ({', '.join(parts)})\n---'
+        content = (r.get('content') or '').rstrip('\n')
+        out.append(meta)
+        out.append(content)
+        out.append('')
+    return '\n'.join(out)
+
 logger = logging.getLogger(__name__)
 
 
@@ -95,37 +122,6 @@ def _build_server() -> Server:
             types.Tool(
                 name="md_select",
                 description=MD_SELECT_DESCRIPTION,
-
-The `md` table has columns:
-  id          INTEGER PRIMARY KEY
-  root        TEXT    — root alias (folder name from DOC_ROOTS)
-  file        TEXT    — relative path inside root
-  line_start  INTEGER — 1-based start line in source file
-  line_end    INTEGER — 1-based end line
-  pos_in_file INTEGER — element position in document order (1..N)
-  parent_pos  INTEGER — pos_in_file of parent element (NULL for top-level)
-  depth       INTEGER — nesting level (0 = top-level)
-  type        TEXT    — element type (see below)
-  content     TEXT    — text content
-  attrs_json  TEXT    — JSON with attributes (level, url, lang, title, list_type, alt)
-
-Element types (type):
-  Block:     heading, paragraph, code_block, list_item, blockquote, table, hr, frontmatter, html
-  Inline:    strong, emphasis, inline_code, link, image, strikethrough, html_inline
-  (inline elements have parent_pos pointing to their parent block, depth > 0)
-
-Attributes in attrs_json:
-  heading:     {"level": 1|2|3|...}
-  code_block:  {"lang": "python"}
-  link:        {"url": "...", "title": "..."}
-  image:       {"url": "...", "alt": "..."}
-  list_item:   {"list_type": "ordered"|"unordered"}
-
-Examples:
-  SELECT * FROM md WHERE type='heading' AND json_extract(attrs_json,'$.level')=1
-  SELECT content FROM md WHERE type='paragraph' AND content LIKE '%API%'
-  SELECT file, COUNT(*) AS cnt FROM md GROUP BY file ORDER BY cnt DESC LIMIT 5
-""",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -140,26 +136,6 @@ Examples:
             types.Tool(
                 name="md_change",
                 description=MD_CHANGE_DESCRIPTION,
-Patches the source .md files on disk and returns a diff.
-
-Requirements:
-  INSERT must specify root (alias), file (relative path), type, and content.
-  UPDATE and DELETE require a WHERE clause (safety — rejected otherwise).
-  Direct modification of the `id` column is forbidden.
-  Use UPDATE to change content or attrs_json of existing elements.
-  Use DELETE to remove elements (blocks are removed as whole lines from the .md file).
-  Use INSERT to add new paragraphs, headings, etc. at a position (or at end by default).
-
-Table columns (same as md_select):
-  id, root, file, line_start, line_end, pos_in_file, parent_pos,
-  depth, type, content, attrs_json
-
-Examples:
-  INSERT INTO md (root, file, type, content, depth)
-      VALUES ('docs', 'api.md', 'paragraph', 'New text', 0)
-  UPDATE md SET content = 'Updated' WHERE type = 'heading' AND content = 'Old'
-  DELETE FROM md WHERE type = 'paragraph' AND content LIKE '%deprecated%'
-""",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -175,37 +151,42 @@ Examples:
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
-        sql = arguments.get("sql", "")
-        if not sql:
-            return [types.TextContent(type="text", text="Error: 'sql' parameter is required")]
-
-        try:
-            if name == "md_select":
-                rows = md_select(_get_conn(), sql)
-                result = json.dumps(rows, ensure_ascii=False, indent=2)
-                if not rows:
-                    result = "[]"
-                return [types.TextContent(type="text", text=result)]
-
-            elif name == "md_change":
-                result = md_change(_get_conn(), sql)
-                # Notify watcher to ignore the files we just wrote
-                for key in result.get("files_changed", []):
-                    r, f = key.split(":", 1)
-                    _get_watcher().ignore_path(r, f)
-                result_json = json.dumps(result, ensure_ascii=False, indent=2)
-                return [types.TextContent(type="text", text=result_json)]
-
-            else:
-                return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
-
-        except ToolError as e:
-            return [types.TextContent(type="text", text=f"Error: {e}")]
-        except Exception as e:
-            logger.exception("Tool %s failed", name)
-            return [types.TextContent(type="text", text=f"Internal error: {e}")]
+        return await _handle_call_tool(name, arguments)
 
     return server
+
+
+async def _handle_call_tool(name: str, arguments: dict) -> list[types.TextContent]:
+    """Tool dispatch logic — extracted for testability."""
+    sql = arguments.get("sql", "")
+    if not sql:
+        return [types.TextContent(type="text", text="Error: 'sql' parameter is required")]
+
+    try:
+        if name == "md_select":
+            rows = md_select(_get_conn(), sql)
+            result = _format_select_result(rows)
+            if not rows:
+                result = "(no results)"
+            return [types.TextContent(type="text", text=result)]
+
+        elif name == "md_change":
+            result = md_change(_get_conn(), sql)
+            # Notify watcher to ignore the files we just wrote
+            for key in result.get("files_changed", []):
+                r, f = key.split(":", 1)
+                _get_watcher().ignore_path(r, f)
+            result_json = json.dumps(result, ensure_ascii=False, indent=2)
+            return [types.TextContent(type="text", text=result_json)]
+
+        else:
+            return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
+
+    except ToolError as e:
+        return [types.TextContent(type="text", text=f"Error: {e}")]
+    except Exception as e:
+        logger.exception("Tool %s failed", name)
+        return [types.TextContent(type="text", text=f"Internal error: {e}")]
 
 
 async def run_server() -> None:
