@@ -467,3 +467,91 @@ def test_parse_attrs_valid_json():
 def test_parse_attrs_invalid_json():
     """Invalid JSON string → empty dict."""
     assert _parse_attrs('{bad') == {}
+
+
+# ── Timeout tests ───────────────────────────────────────────────────────────────
+
+def test_progress_handler_interrupts():
+    """Progress handler returning non-zero interrupts SQL execution."""
+    import sqlite3
+    conn = get_connection()
+    # Simulate timeout: handler returns 1 on every operation
+    conn.set_progress_handler(lambda: 1, 1)
+    with pytest.raises((sqlite3.DatabaseError, sqlite3.OperationalError)):
+        conn.execute("SELECT 1")
+
+
+def test_set_timeout_mechanism(monkeypatch):
+    """_set_timeout sets a deadline-based progress handler that interrupts."""
+    import time
+    from md_sql_server.tools import _set_timeout
+
+    conn = get_connection()
+
+    # Mock time.time so deadline is immediately in the past
+    # First call to time.time() sets deadline = 0 + 15 = 15
+    # Subsequent calls (in progress handler) return 16 > 15 → interrupt
+    call_count = 0
+
+    def mock_time():
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return 0.0  # deadline = 0 + 15 = 15
+        return 16.0  # past deadline → handler returns 1
+
+    monkeypatch.setattr(time, 'time', mock_time)
+    _set_timeout(conn)
+
+    import sqlite3
+    with pytest.raises((sqlite3.DatabaseError, sqlite3.OperationalError)):
+        conn.execute("SELECT 1")
+
+
+# ── FS error tests ──────────────────────────────────────────────────────────────
+
+def test_update_nonexistent_file(monkeypatch):
+    """UPDATE on file that doesn't exist on disk → ToolError."""
+    from md_sql_server.config import RootConfig, set_roots, get_doc_roots
+    from md_sql_server.database import get_connection, load_files
+    import tempfile
+
+    conn = get_connection()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        # Create a doc with one heading
+        md_file = root / 'doc.md'
+        md_file.write_text('# Hello\n', encoding='utf-8')
+
+        cfg = [RootConfig(alias='test', path=root)]
+        set_roots(cfg)
+        load_files(conn, cfg)
+
+        # Delete the file on disk, then try to update
+        md_file.unlink()
+
+        with pytest.raises(ToolError, match='does not exist'):
+            md_change(conn, "UPDATE md SET content='Updated' WHERE type='heading'")
+
+
+def test_delete_nonexistent_file(monkeypatch):
+    """DELETE that matches rows but file is missing → ToolError."""
+    from md_sql_server.config import RootConfig, set_roots
+    from md_sql_server.database import get_connection, load_files
+    import tempfile
+
+    conn = get_connection()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        md_file = root / 'doc.md'
+        md_file.write_text('# Hello\n', encoding='utf-8')
+
+        cfg = [RootConfig(alias='test', path=root)]
+        set_roots(cfg)
+        load_files(conn, cfg)
+
+        # Delete the file on disk
+        md_file.unlink()
+
+        with pytest.raises(ToolError, match='does not exist'):
+            md_change(conn, "DELETE FROM md WHERE type='heading'")

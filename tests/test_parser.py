@@ -332,6 +332,113 @@ def test_block_line_start_not_none():
     print("✅ test_block_line_start_not_none PASSED")
 
 
+def test_frontmatter_basic():
+    """YAML frontmatter is parsed as frontmatter element."""
+    source = "---\ntitle: Test Doc\ndate: 2024-01-01\n---\n\n# Hello\n"
+    elements = parse(source)
+
+    fm = next(el for el in elements if el.type == 'frontmatter')
+    assert fm.content == 'title: Test Doc\ndate: 2024-01-01'
+    assert fm.attrs.get('yaml') == {'title': 'Test Doc', 'date': '2024-01-01'}
+    assert fm.line_start == 1
+    assert fm.line_end == 4  # ---, title, date, ---
+    assert fm.depth == 0
+    assert fm.pos_in_file == 1  # first element
+    print("✅ test_frontmatter_basic PASSED")
+
+
+def test_frontmatter_without_trailing_newline():
+    """Frontmatter at end of file without trailing newline after closing ---."""
+    source = "---\ntitle: Test\n---"
+    elements = parse(source)
+
+    assert len(elements) == 1
+    fm = elements[0]
+    assert fm.type == 'frontmatter'
+    assert fm.content == 'title: Test'
+    assert fm.attrs.get('yaml') == {'title': 'Test'}
+    assert fm.line_start == 1
+    assert fm.line_end == 3
+    print("✅ test_frontmatter_without_trailing_newline PASSED")
+
+
+def test_frontmatter_missing():
+    """No frontmatter → regular Markdown parsing."""
+    source = "# Just a heading\n"
+    elements = parse(source)
+    assert not any(el.type == 'frontmatter' for el in elements)
+    assert any(el.type == 'heading' for el in elements)
+    print("✅ test_frontmatter_missing PASSED")
+
+
+def test_nested_list():
+    """Nested lists: depth increments with nesting."""
+    source = "- Item 1\n  - Sub 1.1\n  - Sub 1.2\n- Item 2\n"
+    elements = parse(source)
+
+    items = [el for el in elements if el.type == 'list_item']
+    assert len(items) == 4
+
+    # Top-level items
+    top = [it for it in items if it.depth == 0]
+    assert len(top) == 2
+    assert top[0].content == 'Item 1'
+    assert top[1].content == 'Item 2'
+
+    # Nested items
+    nested = [it for it in items if it.depth == 1]
+    assert len(nested) == 2
+    assert nested[0].content == 'Sub 1.1'
+    assert nested[1].content == 'Sub 1.2'
+
+    # Check parent_pos: nested items should have parent_pos pointing to their parent list_item
+    for n in nested:
+        assert n.parent_pos is not None
+        parent = next((t for t in top if t.pos_in_file == n.parent_pos), None)
+        assert parent is not None, f"nested {n.content} parent_pos={n.parent_pos} not found"
+    print("✅ test_nested_list PASSED")
+
+
+def test_deeply_nested_list():
+    """Three levels of nested lists."""
+    source = "- Level 0\n  - Level 1\n    - Level 2\n"
+    elements = parse(source)
+
+    items = [el for el in elements if el.type == 'list_item']
+    assert len(items) == 3
+
+    assert items[0].content == 'Level 0'
+    assert items[0].depth == 0
+
+    assert items[1].content == 'Level 1'
+    assert items[1].depth == 1
+
+    assert items[2].content == 'Level 2'
+    assert items[2].depth == 2
+
+    # Chain: Level 2 -> Level 1 -> Level 0
+    assert items[2].parent_pos == items[1].pos_in_file
+    assert items[1].parent_pos == items[0].pos_in_file
+    print("✅ test_deeply_nested_list PASSED")
+
+
+def test_list_with_nested_paragraph():
+    """List item with nested paragraph (blank line between content)."""
+    source = "- Item 1\n\n  Continued\n- Item 2\n"
+    elements = parse(source)
+
+    types = [el.type for el in elements]
+    assert 'list_item' in types
+    items = [el for el in elements if el.type == 'list_item']
+    assert len(items) == 2
+    # The continuation paragraph should be a separate paragraph element
+    # (not a list_item) with depth > 0
+    paras = [el for el in elements if el.type == 'paragraph']
+    nested_paras = [p for p in paras if p.depth > 0]
+    assert len(nested_paras) >= 1
+    print("✅ test_list_with_nested_paragraph PASSED")
+
+
 if __name__ == '__main__':
     test_basic_heading()
     test_heading_levels()

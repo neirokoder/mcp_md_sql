@@ -111,10 +111,11 @@ src/md_sql_server/
 └── server.py         # Точка входа, MCP-сервер
 
 tests/
-├── test_parser.py          # 24 теста парсера
-├── test_reconstructor.py   # 22 теста реконструктора
-├── test_integration.py     # 15 интеграционных тестов
-└── test_select_queries.py  # 43 теста (SELECT + валидация + config)
+├── test_parser.py          # 30 тестов парсера (+ frontmatter, nested lists)
+├── test_reconstructor.py   # 23 теста реконструктора (+ frontmatter)
+├── test_integration.py     # 15 интеграционных тестов (+ integrity check)
+├── test_select_queries.py  # 47 тестов (SELECT + валидация + config + timeout + FS errors)
+└── test_watcher.py         # 4 теста файлового вотчера
 ```
 
 ## Запуск тестов

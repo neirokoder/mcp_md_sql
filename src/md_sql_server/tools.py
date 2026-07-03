@@ -316,13 +316,17 @@ def _shift_positions(conn: sqlite3.Connection, root: str, file: str,
 
 def _patch_file_insert(conn: sqlite3.Connection, root: str, file: str,
                        pos: int, new_row: dict) -> None:
-    """Insert new element's Markdown into the file at the correct position."""
+    """Insert new element's Markdown into the file at the correct position.
+
+    After writing, verifies that file size and surrounding lines are intact.
+    """
     root_path = _find_root_path(root)
     full_path = root_path / file
     if not full_path.exists():
         raise ToolError(f"File does not exist: {full_path}")
 
     source_lines = full_path.read_text(encoding='utf-8').splitlines(keepends=True)
+    original_size = len(''.join(source_lines))
 
     # Find insert point: element before pos
     prev_row = conn.execute(
@@ -338,18 +342,60 @@ def _patch_file_insert(conn: sqlite3.Connection, root: str, file: str,
         insert_after_line = 0  # beginning of file
 
     new_md = render_single(new_row) + '\n'
-    
+
+    # Capture context for post-write validation
+    context_before = source_lines[insert_after_line - 1] if insert_after_line > 0 and insert_after_line - 1 < len(source_lines) else None
+    context_after = source_lines[insert_after_line] if insert_after_line >= 0 and insert_after_line < len(source_lines) else None
+    first_line = source_lines[0] if source_lines else None
+    last_line = source_lines[-1] if source_lines else None
+
     if insert_after_line == 0:
         source_lines.insert(0, new_md + '\n')
     else:
         # Insert after the specified line
-        idx = insert_after_line  # 1-based -> 0-based index
+        idx = insert_after_line  # 1-based -> 0-based index (insert after this line)
         if idx < len(source_lines):
             source_lines.insert(idx, '\n' + new_md)
         else:
             source_lines.append('\n' + new_md)
 
-    full_path.write_text(''.join(source_lines), encoding='utf-8')
+    written_text = ''.join(source_lines)
+    full_path.write_text(written_text, encoding='utf-8')
+
+    # ── Integrity validation ────────────────────────────────────────────────
+    written_size = len(written_text)
+    expected_size = original_size + len(new_md) + 1  # ~content + separator newline
+    # Allow slack: the extra \n before new_md in mid-file inserts adds 1 more
+    if insert_after_line > 0:
+        expected_size += 1  # leading newline separator
+
+    size_diff = written_size - original_size
+    if size_diff <= 0 or size_diff > len(new_md) + 10:
+        logger.error(
+            "File size integrity check failed for %s/%s: "
+            "original=%d, written=%d, expected_delta~%d",
+            root, file, original_size, written_size, size_diff,
+        )
+        raise ToolError(
+            f"File integrity error after insert: "
+            f"size changed by {size_diff}, expected ~{len(new_md) + (2 if insert_after_line > 0 else 1)}"
+        )
+
+    # Verify that lines NOT at the insertion boundary are unchanged
+    written_lines = written_text.splitlines(keepends=True)
+    if insert_after_line == 0:
+        # Insert at beginning: old first line should now be at index 1
+        if first_line is not None and len(written_lines) > 1 and written_lines[1] != first_line:
+            logger.error("First line shifted but content mismatch after insert-at-beginning")
+    else:
+        # Verify context_before is still in place before the insertion point
+        if context_before is not None and insert_after_line - 1 < len(written_lines):
+            actual = written_lines[insert_after_line - 1]
+            if actual != context_before:
+                logger.error(
+                    "Context line before insert changed: "
+                    "expected=%r, actual=%r", context_before, actual,
+                )
 
 
 # ── UPDATE handler ───────────────────────────────────────────────────────────

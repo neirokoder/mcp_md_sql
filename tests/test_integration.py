@@ -564,6 +564,41 @@ def test_update_tracks_freshly_inserted_row():
         return
 
 
+def test_insert_integrity_check():
+    """_patch_file_insert: file size and context lines preserved after insert."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        test_file = root / "integrity.md"
+        test_file.write_text("# First\n\n## Second\n\nParagraph.\n", encoding='utf-8')
+
+        conn = get_connection()
+        roots = [RootConfig(alias="proj", path=root)]
+        set_roots(roots)
+        load_files(conn, roots)
+
+        original_size = test_file.stat().st_size
+
+        # Insert a paragraph between heading and sub-heading
+        result = md_change(conn,
+            "INSERT INTO md (root, file, type, content, depth, pos_in_file) "
+            "VALUES ('proj', 'integrity.md', 'paragraph', 'Inserted para', 0, 3)")
+        assert len(result['changes']) == 1
+        assert result['changes'][0]['operation'] == 'insert'
+
+        written = test_file.read_text(encoding='utf-8')
+        assert len(written) > original_size, "File size must increase after insert"
+
+        # Verify the inserted content appears in the file
+        assert 'Inserted para' in written, "Inserted content not found in file"
+        # Verify content before and after insertion is preserved
+        assert '# First' in written
+        assert '## Second' in written
+        assert 'Paragraph.' in written
+        print("test_insert_integrity_check PASSED")
+
+        return
+
+
 if __name__ == '__main__':
     test_parse_and_select()
     test_parse_inline_elements()

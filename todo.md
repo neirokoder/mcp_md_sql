@@ -1,18 +1,10 @@
-## Выполнено ✅
+# Сделано
 
-### Правки кода
-- `_render_element` — фикс двойного `get`
-- `_build_insert_sql` → параметризованный запрос, `_sql_quote` удалена
-- `_handle_update` — детерминированное отслеживание after-строк по `id`
-- `_handle_delete` — проверка `matched no rows`
-- `_validate_select` — запрет multi-statement
-- `_validate_dml` — `_extract_set_columns` вместо regex
-- `INSERT OR REPLACE` — поддержан (optional modifier в regex)
-- Поле `version` удалено из схемы, INSERT, UPDATE, валидации, тестов
-- `parse_doc_roots` — поддержка JSON-массива + fallback на legacy `;` формат
-- `server.py` — приём roots от IDE через MCP протокол (lazy при list_tools)
+## Тесты
+- [x] Таймаут: progress_handler напрямую + `_set_timeout` через monkeypatch
+- [x] Frontmatter: парсинг YAML frontmatter + реконструкция
+- [x] Вложенные списки: 2 уровня + 3 уровня + вложенный paragraph
+- [x] ФС-ошибки: ToolError при отсутствии файла для UPDATE и DELETE
 
-### Тесты
-- 103 теста (все проходят, 0 warnings)
-- 30 типовых SELECT-запросов
-- DELETE, SELECT, config, _parse_attrs — граничные случаи и отказоустойчивость
+## Улучшение _patch_file_insert
+- [x] Проверка целостности: размер файла, контекст строк до/после вставки

@@ -160,6 +160,26 @@ def test_reconstruct_empty():
     print("✅ test_reconstruct_empty PASSED")
 
 
+def test_render_frontmatter_with_content():
+    """Frontmatter renders as ---\ncontent\n---."""
+    row = {'type': 'frontmatter', 'content': 'title: Test\ndate: 2024'}
+    result = render_single(row)
+    assert result == '---\ntitle: Test\ndate: 2024\n---'
+    print("✅ test_render_frontmatter_with_content PASSED")
+
+
+def test_reconstruct_with_frontmatter():
+    """Full reconstruction with frontmatter + heading."""
+    rows = [
+        {'type': 'frontmatter', 'content': 'title: Doc', 'attrs_json': '{}', 'depth': 0},
+        {'type': 'heading', 'content': 'Title', 'attrs_json': '{"level": 1}', 'depth': 0},
+    ]
+    result = reconstruct(rows)
+    expected = '---\ntitle: Doc\n---\n\n# Title\n'
+    assert result == expected, f"Got: {result!r}"
+    print("✅ test_reconstruct_with_frontmatter PASSED")
+
+
 if __name__ == '__main__':
     test_render_heading()
     test_render_paragraph()

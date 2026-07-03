@@ -23,11 +23,11 @@ Use json_extract(attrs_json, '$.key') to query attributes.
 """
 
 MD_CHANGE_DESCRIPTION = """\
-Modify Markdown documentation via INSERT / UPDATE / DELETE (standard SQLite SQL).
-Patches source .md files and returns a diff.
+Modify Markdown files via SQL. INSERT, UPDATE, DELETE to table `md` are applied as patches
+to the original .md files. Returns a diff.
 
 INSERT requires: root (alias), file, type, content.
 UPDATE and DELETE require a WHERE clause (rejected otherwise).
 
-Table columns same as md_select.
+Table `md` columns same as md_select.
 """

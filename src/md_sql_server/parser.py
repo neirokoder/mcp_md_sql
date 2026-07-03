@@ -31,15 +31,72 @@ class ParsedElement:
     list_type: str = ''  # 'ordered' or 'unordered' (set during walk)
 
 
+def _extract_frontmatter(source: str) -> tuple[ParsedElement | None, str]:
+    """Extract YAML frontmatter block (---\n...\n---) from source.
+
+    Returns (frontmatter_element_or_None, remaining_source).
+    """
+    if not source.startswith('---\n'):
+        return None, source
+
+    # Find closing ---
+    end_idx = source.find('\n---\n', 4)
+    if end_idx == -1:
+        # Check for --- at end of file (no trailing newline after closing)
+        if source.endswith('\n---'):
+            end_idx = len(source) - 4
+            closing_offset = 4  # \n---
+            # Re-check: ensure there's nothing after ---
+            pass
+        else:
+            return None, source
+    else:
+        closing_offset = 5  # \n---\n
+
+    yaml_text = source[4:end_idx]
+    remaining = source[end_idx + closing_offset:]
+
+    # Basic YAML key-value parsing
+    yaml_dict = {}
+    for line in yaml_text.split('\n'):
+        line = line.strip()
+        if not line or line.startswith('#'):
+            continue
+        if ':' in line:
+            key, _, val = line.partition(':')
+            key = key.strip()
+            val = val.strip()
+            if val and val[0] in ("'", '"') and val[-1] == val[0]:
+                val = val[1:-1]
+            yaml_dict[key] = val
+
+    # Calculate line_end: count lines in frontmatter block
+    line_end = len(source[:end_idx + closing_offset].splitlines())
+    el = ParsedElement(
+        type='frontmatter',
+        content=yaml_text,
+        attrs={'yaml': yaml_dict},
+        line_start=1,
+        line_end=line_end,
+    )
+    return el, remaining
+
+
 def parse(source: str) -> list[ParsedElement]:
     """Parse Markdown source into a flat list of elements."""
+    # Extract frontmatter before parsing
+    frontmatter_el, body = _extract_frontmatter(source)
+
     md = mistune.create_markdown(
         renderer='ast',
         plugins=['strikethrough', 'table', 'task_lists'],
     )
-    ast = md(source)
+    ast = md(body)
 
     elements: list[ParsedElement] = []
+    if frontmatter_el is not None:
+        elements.append(frontmatter_el)
+
     parent_refs: dict[int, int] = {}  # id(child_el) → id(parent_el)
     _walk(ast, elements, depth=0, parent_key=None, list_type='unordered',
           parent_refs=parent_refs)
@@ -475,6 +532,8 @@ def _find_line_positions(source: str, elements: list[ParsedElement]) -> None:
 
     Uses cursor-based scanning: walks source lines in order,
     matching each top-level element to its line range.
+    Elements with pre-set line_start (e.g. frontmatter) are
+    skipped and advance the cursor.
     Nested elements (depth > 0) remain unassigned — they
     share their parent's line range.
     """
@@ -485,6 +544,10 @@ def _find_line_positions(source: str, elements: list[ParsedElement]) -> None:
     top_level = [el for el in elements if el.depth == 0]
 
     for el in top_level:
+        if el.line_start is not None:
+            # Element already has line positions (e.g. frontmatter)
+            cursor = el.line_end if el.line_end else cursor
+            continue
         start, end = _scan_element(source_lines, cursor, el)
         if start is not None:
             el.line_start = start + 1
