@@ -139,6 +139,36 @@ class TestFormatSelectResult:
         assert result.startswith('f.md'), f"Got: {result}"
         assert '/\n' not in result
 
+    def test_extra_columns_shown_as_json(self):
+        rows = [{
+            'root': 'r',
+            'file': 'f.md',
+            'line_start': 1,
+            'line_end': 1,
+            'pos_in_file': 1,
+            'parent_pos': None,
+            'depth': 0,
+            'type': 'heading',
+            'content': '# Hi',
+            'total': 42,
+        }]
+        result = srv._format_select_result(rows)
+        assert '42' in result
+        assert '{"total": 42}' in result
+
+    def test_extra_columns_multi_row(self):
+        rows = [
+            {'root': 'r', 'file': 'f.md', 'line_start': 1, 'line_end': 1,
+             'pos_in_file': 1, 'depth': 0, 'type': 'paragraph',
+             'content': 'A', 'cnt': 3},
+            {'root': 'r', 'file': 'f.md', 'line_start': 3, 'line_end': 3,
+             'pos_in_file': 2, 'depth': 0, 'type': 'paragraph',
+             'content': 'B', 'cnt': 7},
+        ]
+        result = srv._format_select_result(rows)
+        assert result.count('{"cnt": 3}') == 1
+        assert result.count('{"cnt": 7}') == 1
+
 
 # ── integration: _handle_call_tool ───────────────────────────────────────────
 

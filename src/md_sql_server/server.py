@@ -21,8 +21,16 @@ from .watcher import FileWatcher
 
 
 
+STANDARD_COLS = {'root', 'file', 'line_start', 'line_end', 'pos_in_file',
+                 'parent_pos', 'depth', 'type', 'content', 'attrs_json'}
+
+
 def _format_select_result(rows: list[dict]) -> str:
-    """Format md_select result as plain text for AI."""
+    """Format md_select result as plain text for AI.
+
+    Known columns are rendered in the standard block.
+    Any extra columns (e.g. aggregates) are appended as a JSON line.
+    """
     out: list[str] = []
     for r in rows:
         root = r.get('root') or ''
@@ -43,6 +51,12 @@ def _format_select_result(rows: list[dict]) -> str:
         content = (r.get('content') or '').rstrip('\n')
         out.append(meta)
         out.append(content)
+
+        # Extra columns not in the standard set — emit as JSON
+        extra = {k: v for k, v in r.items() if k not in STANDARD_COLS}
+        if extra:
+            out.append(json.dumps(extra, ensure_ascii=False))
+
         out.append('')
     return '\n'.join(out)
 

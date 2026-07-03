@@ -122,15 +122,50 @@ def _extract_insert_columns(sql: str) -> set[str]:
     return {c.strip().lower() for c in m.group(1).split(',')}
 
 
+def _split_set_clause(set_clause: str) -> list[str]:
+    """Split SET clause into ``col=val`` parts, respecting quotes and parens.
+
+    Avoids splitting on commas inside string values or nested parentheses.
+    """
+    parts = []
+    current = ''
+    depth = 0
+    in_quote = False
+    quote_char = ''
+    for ch in set_clause:
+        if ch in ("'", '"') and not in_quote:
+            in_quote = True
+            quote_char = ch
+            current += ch
+        elif ch == quote_char and in_quote:
+            in_quote = False
+            current += ch
+        elif ch == '(' and not in_quote:
+            depth += 1
+            current += ch
+        elif ch == ')' and not in_quote:
+            depth -= 1
+            current += ch
+        elif ch == ',' and depth == 0 and not in_quote:
+            parts.append(current.strip())
+            current = ''
+        else:
+            current += ch
+    if current.strip():
+        parts.append(current.strip())
+    return parts
+
+
 def _extract_set_columns(sql: str) -> set[str]:
-    """Extract column names from UPDATE ... SET col=val, col2=val2 ... ."""
-    m = re.search(r'\bSET\b\s+(.+?)(\bWHERE\b|$)', sql, re.IGNORECASE | re.DOTALL)
-    if not m:
-        return set()
-    set_clause = m.group(1)
+    """Extract column names from UPDATE ... SET col=val, col2=val2 ... .
+
+    Uses quote/paren-aware split to avoid false positives from
+    commas inside string values or nested expressions.
+    """
+    set_clause = _split_update(sql)[0]
     cols: set[str] = set()
-    for part in set_clause.split(','):
-        eq = part.strip().split('=', 1)
+    for part in _split_set_clause(set_clause):
+        eq = part.split('=', 1)
         if eq:
             col = eq[0].strip().lower()
             if col and col != '?':
@@ -170,6 +205,14 @@ def _handle_insert(conn: sqlite3.Connection, sql: str) -> dict[str, Any]:
         cur = conn.execute("SELECT COALESCE(MAX(pos_in_file), 0) FROM md WHERE root = ? AND file = ?",
                           (root, file))
         target_pos = cur.fetchone()[0] + 1
+        values['pos_in_file'] = target_pos
+    elif isinstance(target_pos, str) and not target_pos.lstrip('-').isdigit():
+        # Subquery / expression — execute to compute the actual position
+        cur = conn.execute(f"SELECT ({target_pos})")
+        row = cur.fetchone()
+        if row is None or row[0] is None:
+            raise ToolError(f"pos_in_file expression returned NULL: {target_pos}")
+        target_pos = int(row[0])
         values['pos_in_file'] = target_pos
     else:
         target_pos = int(target_pos)
@@ -254,9 +297,13 @@ def _parse_insert_values(sql: str) -> dict[str, Any]:
 
 
 def _split_values(raw: str) -> list[str]:
-    """Split VALUES clause into individual values, respecting quotes."""
+    """Split VALUES clause into individual values, respecting quotes and paren depth.
+
+    Handles nested subqueries like ``(SELECT MAX(x) FROM t WHERE a = 1)``.
+    """
     parts = []
     current = ''
+    depth = 0
     in_quote = False
     quote_char = ''
     for ch in raw:
@@ -267,7 +314,13 @@ def _split_values(raw: str) -> list[str]:
         elif ch == quote_char and in_quote:
             in_quote = False
             current += ch
-        elif ch == ',' and not in_quote:
+        elif ch == '(' and not in_quote:
+            depth += 1
+            current += ch
+        elif ch == ')' and not in_quote:
+            depth -= 1
+            current += ch
+        elif ch == ',' and depth == 0 and not in_quote:
             parts.append(current.strip())
             current = ''
         else:
@@ -278,11 +331,14 @@ def _split_values(raw: str) -> list[str]:
 
 
 def _unquote(val: str) -> Any:
-    """Remove quotes from a SQL value."""
+    """Remove quotes from a SQL value, unescaping SQL-escaped quotes ``''``."""
     val = val.strip()
     if (val.startswith("'") and val.endswith("'")) or \
        (val.startswith('"') and val.endswith('"')):
-        return val[1:-1]
+        inner = val[1:-1]
+        # SQL escaped quotes: '' → '  and  "" → "
+        inner = inner.replace("''", "'").replace('""', '"')
+        return inner
     # Try numeric
     try:
         return int(val)
@@ -453,11 +509,12 @@ def _handle_update(conn: sqlite3.Connection, sql: str) -> dict[str, Any]:
             'new_attrs_json': new['attrs_json'],
         })
 
-    # Patch affected files
+    # Patch affected files — no full reload (preserves row ids)
     for key in affected_files:
         r, f = key.split(':', 1)
-        _patch_file_update(conn, r, f, before_map, after_map)
-        _reload_after_write(conn, r, f)
+        patches = _patch_file_update(conn, r, f, before_map, after_map)
+        if patches:
+            _reload_after_update(conn, r, f, patches)
 
     conn.commit()
     return {
@@ -466,28 +523,82 @@ def _handle_update(conn: sqlite3.Connection, sql: str) -> dict[str, Any]:
     }
 
 
+def _split_update(sql: str) -> tuple[str, str]:
+    """Split UPDATE SQL into (set_clause, where_clause) respecting quotes and parens.
+
+    Handles:
+    - Content with WHERE, parentheses inside string values.
+    - Escaped single quotes ``''`` (SQL standard).
+    - Nested parentheses.
+    Returns (set_clause, where_clause) — both stripped.
+    """
+    m = re.search(r'\bUPDATE\s+\S+\s+SET\s+', sql, re.IGNORECASE)
+    if not m:
+        return ('', '')
+
+    start = m.end()
+    depth = 0
+    in_quote = False
+    quote_char = ''
+    set_end = len(sql)
+
+    i = start
+    while i < len(sql):
+        ch = sql[i]
+
+        if ch in ("'", '"') and not in_quote:
+            in_quote = True
+            quote_char = ch
+        elif ch == quote_char and in_quote:
+            # SQL escaped quote (doubled): '' inside a single-quoted string
+            if ch == "'" and i + 1 < len(sql) and sql[i + 1] == "'":
+                i += 2  # skip both, stay inside string
+                continue
+            in_quote = False
+        elif ch == '(' and not in_quote:
+            depth += 1
+        elif ch == ')' and not in_quote:
+            depth -= 1
+        elif depth == 0 and not in_quote:
+            # Check for WHERE keyword at word boundary
+            if i + 5 <= len(sql) and sql[i:i+5].upper() == 'WHERE':
+                prev_char = sql[i - 1] if i > 0 else ' '
+                if not prev_char.isalnum() and prev_char != '_':
+                    set_end = i
+                    break
+
+        i += 1
+
+    set_clause = sql[start:set_end].strip().rstrip(',')
+    where_clause = sql[set_end + 5:].strip() if set_end + 5 < len(sql) else ''
+    return (set_clause, where_clause)
+
+
 def _strip_set(sql: str) -> str:
     """Extract SET ... clause from UPDATE ... SET ... WHERE."""
-    m = re.search(
-        r'UPDATE\s+\S+\s+SET\s+(.+?)\s+WHERE\b',
-        sql, re.IGNORECASE | re.DOTALL,
-    )
-    if m:
-        return m.group(1)
-    # No WHERE clause — shouldn't happen since we validated
-    m = re.search(r'UPDATE\s+\S+\s+SET\s+(.+)', sql, re.IGNORECASE | re.DOTALL)
-    return m.group(1) if m else ''
+    return _split_update(sql)[0]
 
 
 def _extract_where(sql: str) -> str:
-    """Extract WHERE clause from DML statement."""
+    """Extract WHERE clause from DML statement.
+
+    Uses _split_update for UPDATE (handles WHERE inside strings).
+    Uses simple regex for DELETE/INSERT (no SET clause with strings).
+    """
+    stripped = sql.strip()
+    if stripped.upper().startswith('UPDATE'):
+        return _split_update(sql)[1]
+    # DELETE / INSERT — WHERE is at the end, no SET clause before
     m = re.search(r'\bWHERE\b\s+(.+)$', sql, re.IGNORECASE | re.DOTALL)
     return m.group(1).strip() if m else ''
 
 
 def _patch_file_update(conn: sqlite3.Connection, root: str, file: str,
-                       before_map: dict[int, dict], after_map: dict[int, dict]) -> None:
-    """Surgically replace lines in file for updated elements."""
+                       before_map: dict[int, dict], after_map: dict[int, dict]) -> list[tuple[int, int, int, str]]:
+    """Surgically replace lines in file for updated elements.
+
+    Returns list of (row_id, line_start, line_end, new_text) for DB sync.
+    """
     root_path = _find_root_path(root)
     full_path = root_path / file
     if not full_path.exists():
@@ -499,24 +610,24 @@ def _patch_file_update(conn: sqlite3.Connection, root: str, file: str,
     file_before = {k: v for k, v in before_map.items() if v['file'] == file and v['root'] == root}
     file_after = {k: v for k, v in after_map.items() if v['file'] == file and v['root'] == root}
 
-    # Build patches: list of (line_start, line_end, new_text)
+    # Build patches: list of (row_id, line_start, line_end, new_text)
     patches = []
     for row_id, old in file_before.items():
         new = file_after.get(row_id)
         if new is None:
             continue
-        
+
         if old['line_start'] is None:
             # Inline element — patch parent instead
             _patch_inline_parent(conn, root, file, old, new, patches, source_lines)
             continue
 
         new_md = render_single(new)
-        patches.append((old['line_start'], old['line_end'], new_md))
+        patches.append((row_id, old['line_start'], old['line_end'], new_md))
 
     # Apply patches bottom-to-top
-    patches.sort(key=lambda p: p[0], reverse=True)
-    for line_start, line_end, new_text in patches:
+    patches.sort(key=lambda p: p[1], reverse=True)  # sort by line_start
+    for row_id, line_start, line_end, new_text in patches:
         start_idx = line_start - 1  # 1-based -> 0-based
         end_idx = line_end  # exclusive
         # Replace lines [start_idx, end_idx) with new_text
@@ -524,6 +635,7 @@ def _patch_file_update(conn: sqlite3.Connection, root: str, file: str,
         source_lines[start_idx:end_idx] = new_lines
 
     full_path.write_text(''.join(source_lines), encoding='utf-8')
+    return patches
 
 
 def _patch_inline_parent(conn: sqlite3.Connection, root: str, file: str,
@@ -568,7 +680,7 @@ def _patch_inline_parent(conn: sqlite3.Connection, root: str, file: str,
             # Last resort: re-render parent from DB
             new_source = render_single(dict(parent_row))
 
-    patches.append((parent_line_start, parent_line_end, new_source.rstrip('\n')))
+    patches.append((parent_row['id'], parent_line_start, parent_line_end, new_source.rstrip('\n')))
 
 
 def _build_inline_regex(el: dict) -> re.Pattern | None:
@@ -694,15 +806,15 @@ def _handle_delete(conn: sqlite3.Connection, sql: str) -> dict[str, Any]:
     # Execute DELETE
     conn.execute(f"DELETE FROM md WHERE {where_clause}")
 
-    # Patch files: block deletions
+    # Patch files: block deletions — reload with id preservation
     for (root, file), deleted_rows in files_deletions.items():
         _patch_file_delete(root, file, deleted_rows)
-        _reload_after_write(conn, root, file)
+        _reload_preserve_ids(conn, root, file)
 
-    # Patch files: inline deletions (re-render parent)
+    # Patch files: inline deletions (re-render parent) — reload with id preservation
     for (root, file), inline_rows in files_inline_patches.items():
         _patch_file_inline_deletes(conn, root, file, inline_rows)
-        _reload_after_write(conn, root, file)
+        _reload_preserve_ids(conn, root, file)
 
     conn.commit()
     return {
@@ -832,3 +944,62 @@ def _reload_after_write(conn: sqlite3.Connection, root: str, file: str) -> None:
     """Reload a file into the database after writing to it."""
     root_path = _find_root_path(root)
     reload_file(conn, root, file, root_path)
+
+
+def _reload_after_update(conn: sqlite3.Connection, root: str, file: str,
+                         patches: list[tuple[int, int, int, str]]) -> None:
+    """After _patch_file_update, sync DB line numbers using patch metadata.
+
+    Updates line_end for affected rows (including parent rows of inline elements)
+    and shifts line_start/line_end for rows below. Avoids a full file reload.
+    """
+    for row_id, line_start, line_end, new_text in patches:
+        old_line_count = line_end - line_start + 1
+        new_line_count = len((new_text + '\n').splitlines(keepends=True))
+        delta = new_line_count - old_line_count
+
+        # Update the affected row's line_end to match new content
+        conn.execute(
+            "UPDATE md SET line_end = ? WHERE id = ?",
+            (line_start + new_line_count - 1, row_id),
+        )
+
+        # Shift line_start/line_end for rows below the changed range
+        if delta != 0:
+            conn.execute(
+                """UPDATE md SET line_start = line_start + ?, line_end = line_end + ?
+                   WHERE root = ? AND file = ? AND line_start > ?""",
+                (delta, delta, root, file, line_end),
+            )
+
+
+def _reload_preserve_ids(conn: sqlite3.Connection, root: str, file: str) -> None:
+    """Reload a file and preserve ids for rows that still match.
+
+    Collects old rows before reload, then restores ids where
+    (type, content) match after reload.
+    Uses (type, content) because pos_in_file may shift after DELETE.
+    Handles duplicate (type, content) by consuming in order.
+    """
+    from collections import defaultdict
+
+    old_rows = conn.execute(
+        "SELECT * FROM md WHERE root = ? AND file = ?", (root, file)
+    ).fetchall()
+    old_by_key: dict[tuple, list[int]] = defaultdict(list)
+    for r in old_rows:
+        key = (r['type'], r['content'])
+        old_by_key[key].append(r['id'])
+
+    root_path = _find_root_path(root)
+    reload_file(conn, root, file, root_path)
+
+    new_rows = conn.execute(
+        "SELECT * FROM md WHERE root = ? AND file = ?", (root, file)
+    ).fetchall()
+    for nr in new_rows:
+        key = (nr['type'], nr['content'])
+        if key in old_by_key and old_by_key[key]:
+            old_id = old_by_key[key].pop(0)
+            if old_id != nr['id']:
+                conn.execute("UPDATE md SET id = ? WHERE id = ?", (old_id, nr['id']))

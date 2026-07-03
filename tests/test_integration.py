@@ -2,9 +2,12 @@
 
 import json
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
+
+import pytest
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
@@ -460,6 +463,36 @@ def test_insert_with_special_chars():
         assert result['changes'][0]['operation'] == 'insert'
         print("test_insert_with_special_chars PASSED")
 
+
+def test_insert_with_escaped_apostrophe():
+    """INSERT with SQL-escaped single quote '' in content."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        test_file = root / "apostrophe.md"
+        test_file.write_text("# Title\n", encoding='utf-8')
+
+        conn = get_connection()
+        roots = [RootConfig(alias="project", path=root)]
+        set_roots(roots)
+        load_files(conn, roots)
+
+        # SQL escaping '' → ' inside single-quoted string
+        result = md_change(conn,
+            "INSERT INTO md (root, file, type, content, depth) "
+            "VALUES ('project', 'apostrophe.md', 'paragraph', 'User''s name', 0)")
+
+        assert len(result['changes']) == 1
+        assert result['changes'][0]['operation'] == 'insert'
+        # Verify SQL-escaped '' was converted to single quote in stored value
+        assert result['changes'][0]['new_content'] == "User's name", \
+            f"Expected 'User\'s name', got {result['changes'][0]['new_content']!r}"
+
+        # Verify via SELECT (use SQL escaping '' for the apostrophe)
+        rows = md_select(conn,
+            "SELECT content FROM md WHERE type='paragraph' AND content = 'User''s name'")
+        assert len(rows) == 1
+        print("✅ test_insert_with_escaped_apostrophe PASSED")
+
         return
 
 
@@ -597,6 +630,280 @@ def test_insert_integrity_check():
         print("test_insert_integrity_check PASSED")
 
         return
+
+
+@pytest.mark.asyncio
+async def test_insert_with_subquery_pos():
+    """INSERT with subquery expression in VALUES for pos_in_file."""
+    tmpdir = tempfile.mkdtemp()
+    root = Path(tmpdir)
+    docs_dir = root / "docs"
+    docs_dir.mkdir()
+    test_file = docs_dir / "api.md"
+    test_file.write_text("# A\n\n## B\n\nBody.\n", encoding='utf-8')
+
+    with test_file.open():
+        pass  # keep tmpdir alive for the test scope
+
+    conn = get_connection()
+    roots = [RootConfig(alias="proj", path=root)]
+    set_roots(roots)
+    load_files(conn, roots)
+
+    # Get max pos before insert
+    before_max = md_select(conn,
+        "SELECT MAX(pos_in_file) as max_pos FROM md WHERE root='proj' AND file='docs/api.md'")
+    max_before = before_max[0]['max_pos']
+
+    # INSERT with subquery as pos_in_file
+    result = md_change(conn,
+        "INSERT INTO md (root, file, pos_in_file, depth, type, content, attrs_json) "
+        "VALUES ('proj', 'docs/api.md', "
+        "(SELECT MAX(pos_in_file)+1 FROM md WHERE root='proj' AND file='docs/api.md'), "
+        "0, 'paragraph', 'Inserted via subquery', '{}')")
+
+    assert result['changes'][0]['operation'] == 'insert'
+    assert result['changes'][0]['new_content'] == 'Inserted via subquery'
+
+    # Verify file was patched
+    content = test_file.read_text(encoding='utf-8')
+    assert 'Inserted via subquery' in content
+
+    # Verify DB has the row at the correct position
+    rows = md_select(conn,
+        "SELECT pos_in_file, content FROM md "
+        "WHERE root='proj' AND file='docs/api.md' AND content='Inserted via subquery'")
+    assert len(rows) == 1
+    assert rows[0]['pos_in_file'] == max_before + 1
+
+    shutil.rmtree(tmpdir)  # cleanup
+
+
+def test_update_preserves_ids():
+    """UPDATE changes content but preserves row ids (no full reload)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        docs_dir = root / "docs"
+        docs_dir.mkdir()
+        test_file = docs_dir / "ids.md"
+        test_file.write_text("# A\n\nPara.\n\n## B\n", encoding='utf-8')
+
+        conn = get_connection()
+        roots = [RootConfig(alias="r", path=root)]
+        set_roots(roots)
+        load_files(conn, roots)
+
+        # Capture ids before
+        before_ids = md_select(conn,
+            "SELECT id FROM md WHERE root='r' AND file='docs/ids.md' ORDER BY pos_in_file")
+        before_list = [r['id'] for r in before_ids]
+
+        # UPDATE a paragraph
+        md_change(conn,
+            "UPDATE md SET content = 'Updated para' "
+            "WHERE root='r' AND file='docs/ids.md' AND type='paragraph'")
+
+        # Verify ids unchanged
+        after_ids = md_select(conn,
+            "SELECT id FROM md WHERE root='r' AND file='docs/ids.md' ORDER BY pos_in_file")
+        after_list = [r['id'] for r in after_ids]
+
+        assert after_list == before_list, f"Ids changed: before={before_list}, after={after_list}"
+        print("✅ test_update_preserves_ids PASSED")
+
+
+def test_delete_preserves_ids():
+    """DELETE one row preserves ids of remaining rows in the same file."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        docs_dir = root / "docs"
+        docs_dir.mkdir()
+        test_file = docs_dir / "ids.md"
+        test_file.write_text("# A\n\nPara.\n\n## B\n\nBody.\n", encoding='utf-8')
+
+        conn = get_connection()
+        roots = [RootConfig(alias="r", path=root)]
+        set_roots(roots)
+        load_files(conn, roots)
+
+        # Capture all ids
+        before = md_select(conn,
+            "SELECT id, content FROM md WHERE root='r' AND file='docs/ids.md' ORDER BY pos_in_file")
+        before_map = {r['content']: r['id'] for r in before}
+
+        # Delete the paragraph
+        md_change(conn,
+            "DELETE FROM md WHERE root='r' AND file='docs/ids.md' AND type='paragraph'")
+
+        # Verify remaining rows keep their ids
+        after = md_select(conn,
+            "SELECT id, content FROM md WHERE root='r' AND file='docs/ids.md' ORDER BY pos_in_file")
+        for r in after:
+            expected_id = before_map.get(r['content'])
+            assert expected_id is not None, f"Content {r['content']!r} not found before"
+            assert r['id'] == expected_id, (
+                f"Id changed for {r['content']!r}: {expected_id} -> {r['id']}")
+        print("✅ test_delete_preserves_ids PASSED")
+
+
+def test_update_inline_adds_lines():
+    """Inline element update that adds lines shifts parent line_end and rows below."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        docs_dir = root / "docs"
+        docs_dir.mkdir()
+        test_file = docs_dir / "inline.md"
+        # Paragraph with inline strong on one line
+        test_file.write_text("# Top\n\nHello **world** today\n\n## Bottom\n", encoding='utf-8')
+
+        conn = get_connection()
+        roots = [RootConfig(alias="r", path=root)]
+        set_roots(roots)
+        load_files(conn, roots)
+
+        # Capture state before
+        before_rows = md_select(conn,
+            "SELECT id, line_start, line_end, type, content FROM md "
+            "WHERE root='r' AND file='docs/inline.md' ORDER BY pos_in_file")
+        before = {r['type']: r for r in before_rows}
+
+        # Get heading 'Bottom' line_start before update
+        bottom_before = before['heading'].copy() if before.get('heading') and \
+            'Bottom' in str(before.get('heading', {}).get('content', '')) else None
+        # Actually find it by content
+        bottom_row = [r for r in before_rows if r.get('content') == 'Bottom']
+        bottom_before = bottom_row[0] if bottom_row else None
+
+        # Update strong content to multi-line (real newline in SQL)
+        md_change(conn,
+            "UPDATE md SET content = 'world\nbeautiful' "
+            "WHERE type = 'strong' AND content = 'world'")
+
+        # After state
+        after_rows = md_select(conn,
+            "SELECT id, line_start, line_end, type, content FROM md "
+            "WHERE root='r' AND file='docs/inline.md' ORDER BY pos_in_file")
+
+        # Verify paragraph (parent) line_end shifted
+        para_after = [r for r in after_rows if r['type'] == 'paragraph'][0]
+        para_before = [r for r in before_rows if r['type'] == 'paragraph'][0]
+        assert para_after['line_end'] > para_before['line_end'], (
+            f"Parent line_end should increase: {para_before['line_end']} -> {para_after['line_end']}")
+
+        # Verify rows below (heading 'Bottom') shifted
+        bottom_after = [r for r in after_rows if r.get('content') == 'Bottom'][0]
+        assert bottom_after['line_start'] > bottom_before['line_start'], (
+            f"Bottom heading line_start should increase: "
+            f"{bottom_before['line_start']} -> {bottom_after['line_start']}")
+
+        # Verify ids unchanged for all rows
+        before_id_map = {r['id'] for r in before_rows}
+        after_id_map = {r['id'] for r in after_rows}
+        assert after_id_map == before_id_map, "Ids changed after inline update"
+
+        print("✅ test_update_inline_adds_lines PASSED")
+
+
+def test_update_where_in_string_content():
+    """UPDATE with WHERE inside string content."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        docs_dir = root / "docs"
+        docs_dir.mkdir()
+        test_file = docs_dir / "where_test.md"
+        test_file.write_text(
+            "# \"WHERE\"\n\n"
+            "This query has WHERE in it.\n\n"
+            "## Second\n",
+            encoding='utf-8',
+        )
+
+        conn = get_connection()
+        roots = [RootConfig(alias="r", path=root)]
+        set_roots(roots)
+        load_files(conn, roots)
+
+        # Update with content containing WHERE
+        result = md_change(conn,
+            "UPDATE md SET content = 'This WHERE clause is in content' "
+            "WHERE type='paragraph' AND content LIKE '%WHERE%'")
+
+        assert len(result['changes']) == 1
+        assert result['changes'][0]['new_content'] == 'This WHERE clause is in content'
+
+        # Verify file patched correctly
+        content = test_file.read_text(encoding='utf-8')
+        assert 'This WHERE clause is in content' in content
+
+        # Verify heading with "WHERE" preserved
+        assert 'WHERE' in content or '"WHERE"' in content
+        print("✅ test_update_where_in_string_content PASSED")
+
+
+def test_update_escaped_quote_in_content():
+    """UPDATE with escaped single quote '' and WHERE in same string."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        docs_dir = root / "docs"
+        docs_dir.mkdir()
+        test_file = docs_dir / "quote_test.md"
+        test_file.write_text(
+            "# It's a test\n\n"
+            "User's WHERE guide.\n\n"
+            "## End\n",
+            encoding='utf-8',
+        )
+
+        conn = get_connection()
+        roots = [RootConfig(alias="r", path=root)]
+        set_roots(roots)
+        load_files(conn, roots)
+
+        # Content has apostrophe and WHERE — SQL escaping '' for the quote
+        result = md_change(conn,
+            "UPDATE md SET content = 'User''s WHERE manual' "
+            "WHERE type='paragraph' AND content LIKE '%WHERE%'")
+
+        assert len(result['changes']) == 1
+        assert result['changes'][0]['new_content'] == "User's WHERE manual"
+
+        # Verify file patched
+        content = test_file.read_text(encoding='utf-8')
+        assert "User's WHERE manual" in content
+        print("✅ test_update_escaped_quote_in_content PASSED")
+
+
+def test_update_double_quoted_content():
+    """UPDATE with double-quoted content containing WHERE and single quotes."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        docs_dir = root / "docs"
+        docs_dir.mkdir()
+        test_file = docs_dir / "dq_test.md"
+        test_file.write_text(
+            "# Test\n\n"
+            'User\'s <a href="where">guide</a>.\n\n'
+            "## End\n",
+            encoding='utf-8',
+        )
+
+        conn = get_connection()
+        roots = [RootConfig(alias="r", path=root)]
+        set_roots(roots)
+        load_files(conn, roots)
+
+        # Double-quoted content — single quotes inside are fine, WHERE inside too
+        result = md_change(conn,
+            'UPDATE md SET content = "User\'s WHERE <a href=\'test\'>guide</a>" '
+            "WHERE type='paragraph' AND content LIKE '%WHERE%'")
+
+        assert len(result['changes']) == 1
+        assert "User's WHERE" in result['changes'][0]['new_content']
+
+        # Verify file patched
+        content = test_file.read_text(encoding='utf-8')
+        assert "User's" in content
+        print("✅ test_update_double_quoted_content PASSED")
 
 
 if __name__ == '__main__':

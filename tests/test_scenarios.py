@@ -732,3 +732,487 @@ async def test_chain_insert_special_chars():
         spec = (tdir / 'complex' / 'technical_spec.md').read_text(encoding='utf-8')
         assert 'üñîçödé' in spec, "Unicode chars not preserved in file"
     print(f"✅ S20 PASSED: Unicode and special chars inserted correctly")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# COMPLEX SELECT SCENARIOS (21–26) — aggregates, subqueries, analytics
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_select_group_by_count():
+    """S21: GROUP BY with COUNT — extra column emitted as JSON."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _setup_server(Path(tmpdir))
+
+        result = await srv._handle_call_tool('md_select', {
+            'sql': (
+                "SELECT type, COUNT(*) FROM md WHERE depth=0 "
+                "GROUP BY type ORDER BY COUNT(*) DESC"
+            ),
+        })
+        text = result[0].text
+        assert 'Error:' not in text, f"Unexpected error: {text}"
+        # Each row should have standard block + JSON block with count
+        # e.g. "paragraph" block + '{"COUNT(*)": 42}'
+        assert '"COUNT(*)":' in text, f"Missing COUNT(*) JSON in output:\n{text}"
+        assert '"type":' not in text, "type column should NOT appear in extra JSON"
+        # Verify multiple rows have JSON
+        json_count = text.count('"COUNT(*)":')
+        assert json_count >= 3, f"Expected >=3 rows with COUNT(*), got {json_count}"
+    print(f"✅ S21 PASSED: GROUP BY COUNT(*) → {json_count} rows with JSON")
+
+
+@pytest.mark.asyncio
+async def test_select_aggregates_mixed():
+    """S22: AVG + COUNT + SUM — multiple extra columns in one row."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _setup_server(Path(tmpdir))
+
+        result = await srv._handle_call_tool('md_select', {
+            'sql': (
+                "SELECT type, COUNT(*) AS cnt, AVG(line_end - line_start + 1) AS avg_lines "
+                "FROM md WHERE depth=0 GROUP BY type ORDER BY cnt DESC"
+            ),
+        })
+        text = result[0].text
+        assert 'Error:' not in text, f"Unexpected error: {text}"
+        assert '"cnt":' in text, f"Missing cnt in output:\n{text}"
+        assert '"avg_lines":' in text, f"Missing avg_lines in output:\n{text}"
+        # Verify JSON is well-formed: keys are in one JSON object per row
+        # Each extra JSON line should contain both cnt and avg_lines
+        # e.g. {"cnt": 12, "avg_lines": 3.5}
+        import re
+        json_objects = re.findall(r'\{[^}]+\}', text)
+        combined = [j for j in json_objects if 'cnt' in j and 'avg_lines' in j]
+        assert len(combined) >= 1, f"No row with both cnt and avg_lines"
+    print(f"✅ S22 PASSED: {len(combined)} rows with multiple extra columns")
+
+
+@pytest.mark.asyncio
+async def test_select_having_filter():
+    """S23: GROUP BY + HAVING — filter groups after aggregation."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _setup_server(Path(tmpdir))
+
+        result = await srv._handle_call_tool('md_select', {
+            'sql': (
+                "SELECT file, COUNT(*) AS cnt FROM md WHERE depth=0 "
+                "GROUP BY file HAVING cnt > 50 ORDER BY cnt DESC"
+            ),
+        })
+        text = result[0].text
+        assert 'Error:' not in text, f"Unexpected error: {text}"
+        assert '"cnt":' in text, f"Missing cnt in HAVING query:\n{text}"
+        # At least one file with >50 elements
+        import re
+        cnts = [int(m) for m in re.findall(r'"cnt": (\d+)', text)]
+        assert all(c > 50 for c in cnts), f"All counts should be >50 in HAVING: {cnts}"
+        assert len(cnts) >= 1, f"Expected >=1 file with >50 elements"
+    print(f"✅ S23 PASSED: {len(cnts)} files with >50 elements: {cnts}")
+
+
+@pytest.mark.asyncio
+async def test_select_avg_content_length():
+    """S24: Average content length per type with JSON alias."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _setup_server(Path(tmpdir))
+
+        result = await srv._handle_call_tool('md_select', {
+            'sql': (
+                "SELECT type, ROUND(AVG(LENGTH(content)), 1) AS avg_len "
+                "FROM md GROUP BY type ORDER BY avg_len DESC"
+            ),
+        })
+        text = result[0].text
+        assert 'Error:' not in text, f"Unexpected error: {text}"
+        assert '"avg_len":' in text, f"Missing avg_len:\n{text}"
+        # code_block should have highest avg_len
+        assert 'code_block' in text
+        # Verify JSON values are floats/ints
+        import re
+        lengths = re.findall(r'"avg_len": ([\d.]+)', text)
+        assert len(lengths) >= 4, f"Expected >=4 types, got {len(lengths)}"
+        # First (highest avg_len) should be code_block or table
+        print(f"✅ S24 PASSED: {len(lengths)} types with avg content length")
+
+
+@pytest.mark.asyncio
+async def test_select_subquery_in_where():
+    """S25: Subquery in WHERE clause — filter by aggregate from subquery."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _setup_server(Path(tmpdir))
+
+        result = await srv._handle_call_tool('md_select', {
+            'sql': (
+                "SELECT type, content, file FROM md WHERE depth=0 "
+                "AND LENGTH(content) > ("
+                "  SELECT AVG(LENGTH(content)) FROM md WHERE depth=0"
+                ") ORDER BY LENGTH(content) DESC LIMIT 5"
+            ),
+        })
+        text = result[0].text
+        assert 'Error:' not in text, f"Unexpected error: {text}"
+        # Should return some rows with content longer than average
+        assert 'type:' in text, f"Expected results, got:\n{text}"
+        rows = text.count('type:')
+        assert rows >= 1, f"Expected >=1 row, got {rows}"
+        # No extra columns here — standard projection (SELECT has only standard cols)
+        assert '{"COUNT(*)"' not in text, "Should not have aggregate extra JSON"
+    print(f"✅ S25 PASSED: {rows} rows with above-average content length")
+
+
+@pytest.mark.asyncio
+async def test_select_stats_by_file():
+    """S26: Per-file statistics with multiple aggregates and ORDER BY."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _setup_server(Path(tmpdir))
+
+        result = await srv._handle_call_tool('md_select', {
+            'sql': (
+                "SELECT file, COUNT(*) AS total, "
+                "SUM(CASE WHEN type='heading' THEN 1 ELSE 0 END) AS headings, "
+                "SUM(CASE WHEN type='code_block' THEN 1 ELSE 0 END) AS code_blocks "
+                "FROM md WHERE depth=0 GROUP BY file "
+                "ORDER BY total DESC"
+            ),
+        })
+        text = result[0].text
+        assert 'Error:' not in text, f"Unexpected error: {text}"
+        # Verify all three extra columns present
+        assert '"total":' in text
+        assert '"headings":' in text
+        assert '"code_blocks":' in text
+        # Verify per-file breakdown
+        assert 'complex/' in text
+        # Each file should have its own row
+        import re
+        files = re.findall(r'complex/[\w_-]+\.md', text)
+        assert len(files) >= 5, f"Expected >=5 files, got {len(files)}"
+        # Verify JSON keys per row (one JSON per row with 3 fields)
+        json_objects = re.findall(r'\{[^}]+\}', text)
+        triple = [j for j in json_objects
+                  if all(k in j for k in ('"total"', '"headings"', '"code_blocks"'))]
+        assert len(triple) >= 5, f"Expected >=5 files with triple stats"
+    print(f"✅ S26 PASSED: {len(triple)} files with triple stats")
+
+
+@pytest.mark.asyncio
+async def test_select_window_rank():
+    """S27: Window function — RANK() over files by element count."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _setup_server(Path(tmpdir))
+
+        result = await srv._handle_call_tool('md_select', {
+            'sql': (
+                "SELECT file, COUNT(*) AS cnt, "
+                "RANK() OVER (ORDER BY COUNT(*) DESC) AS rnk "
+                "FROM md WHERE depth=0 GROUP BY file"
+            ),
+        })
+        text = result[0].text
+        assert 'Error:' not in text, f"Unexpected error: {text}"
+        assert '"cnt":' in text, f"Missing cnt:\n{text}"
+        assert '"rnk":' in text, f"Missing rnk:\n{text}"
+        # Most complex file should have rank 1
+        import re
+        ranks = re.findall(r'"rnk": (\d+)', text)
+        assert '1' in ranks, f"Expected rank 1, got {ranks}"
+    print(f"✅ S27 PASSED: {len(ranks)} files ranked by element count")
+
+
+@pytest.mark.asyncio
+async def test_select_self_join_aggregate():
+    """S28: Self-join — parent elements with nested child counts."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _setup_server(Path(tmpdir))
+
+        result = await srv._handle_call_tool('md_select', {
+            'sql': (
+                "SELECT p.type, p.content, COUNT(c.id) AS children "
+                "FROM md p LEFT JOIN md c ON c.parent_pos = p.pos_in_file "
+                "AND c.root = p.root AND c.file = p.file "
+                "WHERE p.depth = 0 AND p.root = 'project' "
+                "AND p.file = 'complex/configuration_guide.md' "
+                "GROUP BY p.id HAVING children > 0 "
+                "ORDER BY children DESC LIMIT 10"
+            ),
+        })
+        text = result[0].text
+        assert 'Error:' not in text, f"Unexpected error: {text}"
+        assert '"children":' in text, f"Missing children:\n{text}"
+        # At least one element with children > 0
+        assert 'list_item' in text or 'paragraph' in text
+        import re
+        child_counts = re.findall(r'"children": (\d+)', text)
+        assert all(int(c) > 0 for c in child_counts), \
+            f"All children should be >0 in HAVING: {child_counts}"
+    print(f"✅ S28 PASSED: {len(child_counts)} parent elements with children")
+
+
+@pytest.mark.asyncio
+async def test_select_distinct_types_json():
+    """S29: DISTINCT with COUNT — verify no standard columns missing."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _setup_server(Path(tmpdir))
+
+        result = await srv._handle_call_tool('md_select', {
+            'sql': (
+                "SELECT DISTINCT type FROM md ORDER BY type"
+            ),
+        })
+        text = result[0].text
+        assert 'Error:' not in text, f"Unexpected error: {text}"
+        # Pure standard columns — no extra JSON
+        assert '"' not in text, "DISTINCT type should not emit JSON"
+        # Should list all distinct types
+        assert 'heading' in text
+        assert 'paragraph' in text
+        assert 'code_block' in text
+        assert 'table' in text
+        assert 'list_item' in text
+        assert 'link' in text
+    print(f"✅ S29 PASSED: DISTINCT types without extra JSON")
+
+
+@pytest.mark.asyncio
+async def test_select_union_all():
+    """S30: UNION ALL — combine results from two queries."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _setup_server(Path(tmpdir))
+
+        result = await srv._handle_call_tool('md_select', {
+            'sql': (
+                "SELECT 'top' AS source, type, content FROM md "
+                "WHERE depth=0 AND file='complex/technical_spec.md' "
+                "AND pos_in_file <= 2 "
+                "UNION ALL "
+                "SELECT 'bottom' AS source, type, content FROM md "
+                "WHERE depth=0 AND file='complex/technical_spec.md' "
+                "AND pos_in_file = (SELECT MAX(pos_in_file) FROM md "
+                "  WHERE depth=0 AND file='complex/technical_spec.md')"
+            ),
+        })
+        text = result[0].text
+        assert 'Error:' not in text, f"Unexpected error: {text}"
+        # source column is extra
+        assert '"source":' in text, f"Missing source in UNION output:\n{text}"
+        # Should see both 'top' and 'bottom'
+        assert '"top"' in text or '"top' in text
+        assert '"bottom"' in text or '"bottom' in text
+    print(f"✅ S30 PASSED: UNION ALL with extra source column")
+
+
+@pytest.mark.asyncio
+async def test_chain_update_then_aggregate_select():
+    """S31: UPDATE several rows → SELECT with GROUP BY + extra columns."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tdir = Path(tmpdir)
+        _setup_server(tdir)
+
+        # Count headings per file before UPDATE
+        before = await srv._handle_call_tool('md_select', {
+            'sql': (
+                "SELECT file, COUNT(*) AS cnt FROM md WHERE type='heading' "
+                "GROUP BY file ORDER BY file"
+            ),
+        })
+        text_before = before[0].text
+        assert 'Error:' not in text_before
+        assert '"cnt":' in text_before, "Expected extra JSON with cnt"
+
+        # Rename 'API' → 'API v2' in all headings across all files
+        update = await srv._handle_call_tool('md_change', {
+            'sql': (
+                "UPDATE md SET content = REPLACE(content, 'API', 'API v2') "
+                "WHERE type='heading' AND content LIKE '%API%'"
+            ),
+        })
+        assert 'Error:' not in update[0].text
+
+        # Re-count headings per file — same GROUP BY, verify counts didn't change
+        after = await srv._handle_call_tool('md_select', {
+            'sql': (
+                "SELECT file, COUNT(*) AS cnt FROM md WHERE type='heading' "
+                "GROUP BY file ORDER BY file"
+            ),
+        })
+        text_after = after[0].text
+        assert 'Error:' not in text_after
+        assert '"cnt":' in text_after, "Missing cnt after UPDATE"
+
+        # Same file names should appear
+        before_files = set()
+        for line in text_before.splitlines():
+            if '.md' in line and 'complex/' in line:
+                before_files.add(line.split()[0])
+        after_files = set()
+        for line in text_after.splitlines():
+            if '.md' in line and 'complex/' in line:
+                after_files.add(line.split()[0])
+        assert before_files == after_files, \
+            f"Files changed after UPDATE: {before_files} vs {after_files}"
+
+        # Verify updated content is searchable
+        verify = await srv._handle_call_tool('md_select', {
+            'sql': (
+                "SELECT type, content FROM md WHERE type='heading' "
+                "AND content LIKE '%API v2%' LIMIT 5"
+            ),
+        })
+        verify_text = verify[0].text
+        assert 'Error:' not in verify_text
+        assert 'API v2' in verify_text, "Updated content not found via SELECT"
+
+        # Verify JSON extra still works with aliased aggregate
+        alias_check = await srv._handle_call_tool('md_select', {
+            'sql': (
+                "SELECT file, COUNT(*) AS total FROM md WHERE type='paragraph' "
+                "GROUP BY file HAVING total > 5 ORDER BY total DESC"
+            ),
+        })
+        alias_text = alias_check[0].text
+        assert 'Error:' not in alias_text
+        assert '"total":' in alias_text, "Missing total in aggregate after UPDATE"
+    print(f"✅ S31 PASSED: UPDATE → aggregate SELECT chain verified")
+
+
+@pytest.mark.asyncio
+async def test_chain_delete_then_aggregate_select():
+    """S32: DELETE some rows → SELECT with GROUP BY verifies counts changed."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tdir = Path(tmpdir)
+        _setup_server(tdir)
+
+        # Count all top-level elements per file
+        before = await srv._handle_call_tool('md_select', {
+            'sql': (
+                "SELECT file, COUNT(*) AS cnt FROM md WHERE depth=0 "
+                "GROUP BY file ORDER BY file"
+            ),
+        })
+        text_before = before[0].text
+        assert 'Error:' not in text_before
+
+        import re
+        before_counts = {}
+        last_file = None
+        for line in text_before.splitlines():
+            m = re.search(r'complex/[\w_-]+\.md', line)
+            if m:
+                last_file = m.group()
+            cm = re.search(r'"cnt": (\d+)', line)
+            if cm and last_file:
+                before_counts[last_file] = int(cm.group(1))
+
+        # Delete all tables (they exist in multiple files)
+        delete = await srv._handle_call_tool('md_change', {
+            'sql': (
+                "DELETE FROM md WHERE type='table' AND depth=0 "
+                "AND root='project'"
+            ),
+        })
+        assert 'Error:' not in delete[0].text
+        data = json.loads(delete[0].text)
+        deleted_tables = len(data['changes'])
+
+        # Re-count — counts should be lower by at least deleted_tables
+        after = await srv._handle_call_tool('md_select', {
+            'sql': (
+                "SELECT file, COUNT(*) AS cnt FROM md WHERE depth=0 "
+                "GROUP BY file ORDER BY file"
+            ),
+        })
+        text_after = after[0].text
+        assert 'Error:' not in text_after
+
+        after_counts = {}
+        last_file = None
+        for line in text_after.splitlines():
+            m = re.search(r'complex/[\w_-]+\.md', line)
+            if m:
+                last_file = m.group()
+            cm = re.search(r'"cnt": (\d+)', line)
+            if cm and last_file:
+                after_counts[last_file] = int(cm.group(1))
+
+        # At least 2 files should have lost elements
+        lost = sum(before_counts.get(f, 0) - after_counts.get(f, 0)
+                   for f in before_counts)
+        assert lost >= deleted_tables, \
+            f"Lost count {lost} should be >= deleted {deleted_tables}"
+        # Verify no more tables in DB
+        verify = await srv._handle_call_tool('md_select', {
+            'sql': (
+                "SELECT type, COUNT(*) AS cnt FROM md WHERE type='table' "
+                "AND depth=0 GROUP BY type"
+            ),
+        })
+        verify_text = verify[0].text
+        assert 'no results' in verify_text, "Tables should be gone"
+    print(f"✅ S32 PASSED: DELETE → aggregate SELECT: {deleted_tables} tables deleted")
+
+
+@pytest.mark.asyncio
+async def test_chain_insert_then_aggregate_select():
+    """S33: INSERT multiple elements → SELECT with GROUP BY reflects new rows."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tdir = Path(tmpdir)
+        _setup_server(tdir)
+
+        # Count paragraphs before
+        before = await srv._handle_call_tool('md_select', {
+            'sql': (
+                "SELECT file, COUNT(*) AS cnt FROM md "
+                "WHERE type='paragraph' AND depth=0 "
+                "AND root='project' AND file='complex/tutorial_quickstart.md' "
+                "GROUP BY file"
+            ),
+        })
+        text_before = before[0].text
+        before_cnt = 0
+        import re
+        m = re.search(r'"cnt": (\d+)', text_before)
+        if m:
+            before_cnt = int(m.group(1))
+
+        # Get max pos
+        pos_result = await srv._handle_call_tool('md_select', {
+            'sql': (
+                "SELECT MAX(pos_in_file) AS max_pos FROM md "
+                "WHERE root='project' AND file='complex/tutorial_quickstart.md'"
+            ),
+        })
+        m = re.search(r'"max_pos": (\d+)', pos_result[0].text)
+        assert m, f"Cannot find max_pos in: {pos_result[0].text}"
+        max_pos = int(m.group(1))
+
+        # Insert 3 paragraphs
+        for i in range(3):
+            new_pos = max_pos + 1 + i
+            insert = await srv._handle_call_tool('md_change', {
+                'sql': (
+                    f"INSERT INTO md (root, file, pos_in_file, depth, type, content, attrs_json) "
+                    f"VALUES ('project', 'complex/tutorial_quickstart.md', {new_pos}, 0, "
+                    f"'paragraph', 'Chain insert test #{i+1}', '{{}}')"
+                ),
+            })
+            assert 'Error:' not in insert[0].text
+
+        # Re-count paragraphs — should have increased by 3
+        after = await srv._handle_call_tool('md_select', {
+            'sql': (
+                "SELECT file, COUNT(*) AS cnt FROM md "
+                "WHERE type='paragraph' AND depth=0 "
+                "AND root='project' AND file='complex/tutorial_quickstart.md' "
+                "GROUP BY file"
+            ),
+        })
+        text_after = after[0].text
+        after_cnt = 0
+        m = re.search(r'"cnt": (\d+)', text_after)
+        if m:
+            after_cnt = int(m.group(1))
+        assert after_cnt == before_cnt + 3, \
+            f"Expected {before_cnt} + 3 = {before_cnt+3}, got {after_cnt}"
+    print(f"✅ S33 PASSED: INSERT 3 paragraphs: {before_cnt} → {after_cnt}")
