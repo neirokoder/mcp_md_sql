@@ -1,105 +1,127 @@
-# md-sql-server
+# md-sql
 
 MCP-сервер для работы с Markdown-документацией как с реляционной базой данных. Парсит `.md` файлы в SQLite-таблицу `md`, предоставляя два MCP-инструмента: `md_select` (SELECT-запросы) и `md_change` (INSERT / UPDATE / DELETE с автоматической записью изменений обратно в исходные файлы).
 
 ## Быстрый старт
 
 ```bash
-# Установка
 pip install -e .
-
-# Запуск (с указанием папок с .md)
-DOC_ROOTS="myproject=./docs;specs=./specifications" md-sql-server
+DOC_ROOTS='["/path/to/docs"]' md-sql
 ```
 
-Сервер работает по протоколу MCP через stdio. Подключите его к вашему MCP-клиенту (например, Zed, Claude Desktop).
+## Подключение к MCP-клиенту
 
-## DOC_ROOTS
+### Zed
 
-Переменная окружения `DOC_ROOTS` задаёт один или несколько корней документации в формате:
-
+```json
+{
+  "mcp_servers": {
+    "md-sql": {
+      "command": "md-sql",
+      "env": {
+        "DOC_ROOTS": "[\"/path/to/docs\"]"
+      }
+    }
+  }
+}
 ```
-alias1=/absolute/path1;alias2=C:/absolute/path2
+
+### Claude Desktop
+
+```json
+{
+  "mcpServers": {
+    "md-sql": {
+      "command": "md-sql",
+      "env": {
+        "DOC_ROOTS": "[\"/path/to/docs\"]"
+      }
+    }
+  }
+}
 ```
 
-Если переменная не задана, используется текущая рабочая директория с алиасом `default`.
+> `DOC_ROOTS` можно не указывать — сервер получит корни от IDE через MCP-протокол. Переменная окружения используется как fallback.
+
+## DOC_ROUTES
+
+JSON-массив путей:
+
+```bash
+DOC_ROOTS='["/project/docs", "/project/specs"]'
+```
+
+Алиас корня генерируется из имени папки. Для путей выше это `docs` и `specs`.
+
+Поддерживается и legacy-формат `alias=/path` (разделитель `;`):
+
+```bash
+DOC_ROOTS="docs=./docs;specs=./specifications"
+```
+
+Если переменная не задана — используется текущая рабочая директория с алиасом `default`.
 
 ## MCP-инструменты
 
 ### `md_select`
 
-Выполняет произвольный SELECT-запрос к таблице `md`. Возвращает JSON-массив строк.
+Выполняет произвольный SELECT-запрос к таблице `md`.
 
 ```
 SELECT * FROM md WHERE type = 'heading' AND depth = 0
-SELECT type, content FROM md WHERE root = 'myproject' ORDER BY pos_in_file
 ```
 
 ### `md_change`
 
-Модифицирует документацию через DML (INSERT / UPDATE / DELETE). Каждая операция:
-1. Вычисляет diff (до/после)
-2. Хирургически патчит исходный `.md` файл (замена строк)
-3. Возвращает список изменений
+Модифицирует документацию через INSERT / UPDATE / DELETE. Хирургически патчит исходный `.md` файл и возвращает diff.
 
-Ограничения безопасности:
-- Только SELECT, INSERT, UPDATE, DELETE (DDL и транзакции запрещены)
+Ограничения:
+- DDL и транзакции запрещены
 - UPDATE и DELETE без WHERE запрещены
-- Прямое изменение `id` и `version` запрещено
+- Прямое изменение `id` запрещено
+- Multi-statement в SELECT запрещены
 - Таймаут SQL-запроса: 15 секунд
 
 ## Таблица `md`
 
-| Колонка      | Тип       | Описание                                        |
-|-------------|-----------|--------------------------------------------------|
-| id          | INTEGER   | Автоинкрементный первичный ключ                  |
-| root        | TEXT      | Алиас корня документации                         |
-| file        | TEXT      | Относительный путь к .md файлу                   |
-| line_start  | INTEGER   | Начальная строка элемента в исходном файле (1-based) |
-| line_end    | INTEGER   | Конечная строка элемента                         |
-| pos_in_file | INTEGER   | Порядковая позиция элемента в документе (1..N)   |
-| parent_pos  | INTEGER   | pos_in_file родительского элемента (NULL для корневых) |
-| depth       | INTEGER   | Уровень вложенности                              |
+| Колонка      | Тип       | Описание                                     |
+|-------------|-----------|------------------------------------------------|
+| id          | INTEGER   | Автоинкрементный первичный ключ                |
+| root        | TEXT      | Алиас корня документации                       |
+| file        | TEXT      | Относительный путь к .md файлу                 |
+| line_start  | INTEGER   | Начальная строка элемента в файле (1-based)     |
+| line_end    | INTEGER   | Конечная строка элемента                        |
+| pos_in_file | INTEGER   | Порядковая позиция в документе (1..N)           |
+| parent_pos  | INTEGER   | pos_in_file родителя (NULL для корневых)        |
+| depth       | INTEGER   | Уровень вложенности                             |
 | type        | TEXT      | Тип элемента (heading, paragraph, list_item, code_block, blockquote, table, strong, emphasis, link, image, inline_code, strikethrough, hr, frontmatter, html, html_inline) |
-| content     | TEXT      | Текстовое содержимое элемента                    |
-| attrs_json  | TEXT      | JSON-строка с атрибутами (level для heading, url для link и т.д.) |
-| version     | INTEGER   | Версия строки для отслеживания изменений         |
-
-## Типы элементов
-
-**Блочные** (depth=0, есть line_start/line_end): heading, paragraph, code_block, list_item, blockquote, table, hr, frontmatter, html
-
-**Инлайн** (depth>0, parent_pos указывает на родителя): strong, emphasis, inline_code, link, image, strikethrough, html_inline
-
-Инлайн-элементы извлекаются как отдельные строки таблицы, но при патче файла обновляются через родительский блок.
+| content     | TEXT      | Содержимое элемента                             |
+| attrs_json  | TEXT      | JSON-строка с атрибутами                       |
 
 ## Структура проекта
 
 ```
-mcp_md/
-├── src/md_sql_server/
-│   ├── config.py         # Конфигурация: DOC_ROOTS, RootConfig
-│   ├── parser.py         # Парсинг .md через mistune в плоский список ParsedElement
-│   ├── database.py       # SQLite (in-memory): схема, загрузка, reload
-│   ├── reconstructor.py  # Обратная сборка Markdown из строк таблицы
-│   ├── tools.py          # md_select и md_change: валидация, diff, хирургический патч
-│   ├── watcher.py        # Live-синхронизация через watchdog
-│   └── server.py         # Точка входа: MCP-сервер, регистрация инструментов
-├── tests/
-│   ├── fixtures/         # Тестовые .md файлы
-│   ├── test_parser.py        # 24 юнит-теста парсера
-│   ├── test_reconstructor.py # 22 юнит-теста реконструктора
-│   └── test_integration.py   # 11 интеграционных тестов (сквозной цикл)
-├── pyproject.toml
-├── guide.md              # Правила и концепция системы
-└── specificity.md        # Значимые аномалии и подсказки
+src/md_sql_server/
+├── config.py         # DOC_ROOTS → RootConfig
+├── parser.py         # Парсинг .md через mistune → flat list
+├── database.py       # SQLite in-memory: схема, загрузка, reload
+├── reconstructor.py  # Обратная сборка Markdown из строк таблицы
+├── tools.py          # md_select / md_change
+├── watcher.py        # Live-синхронизация через watchdog
+└── server.py         # Точка входа, MCP-сервер
+
+tests/
+├── test_parser.py          # 24 теста парсера
+├── test_reconstructor.py   # 22 теста реконструктора
+├── test_integration.py     # 15 интеграционных тестов
+└── test_select_queries.py  # 43 теста (SELECT + валидация + config)
 ```
 
 ## Запуск тестов
 
 ```bash
 pip install -e ".[dev]"
-python -m pytest tests/ -v
+python -m pytest tests/
 ```
 
 ## Зависимости

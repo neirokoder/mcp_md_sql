@@ -28,8 +28,7 @@ CREATE TABLE IF NOT EXISTS md (
     depth       INTEGER DEFAULT 0,
     type        TEXT NOT NULL,
     content     TEXT,
-    attrs_json  TEXT DEFAULT '{}',
-    version     INTEGER DEFAULT 0
+    attrs_json  TEXT DEFAULT '{}'
 );
 
 CREATE INDEX IF NOT EXISTS idx_md_root_file ON md(root, file);
@@ -85,14 +84,13 @@ def load_files(conn: sqlite3.Connection, roots: list[RootConfig] | None = None) 
                     el.type,
                     el.content,
                     json.dumps(el.attrs, ensure_ascii=False) if el.attrs else '{}',
-                    0,
                 ))
 
             conn.executemany(
                 """INSERT INTO md
                    (root, file, line_start, line_end, pos_in_file, parent_pos,
-                    depth, type, content, attrs_json, version)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    depth, type, content, attrs_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 rows,
             )
             total += len(rows)
@@ -124,14 +122,13 @@ def reload_file(conn: sqlite3.Connection, root: str, file: str,
             el.line_start, el.line_end, el.pos_in_file,
             el.parent_pos, el.depth, el.type, el.content,
             json.dumps(el.attrs, ensure_ascii=False) if el.attrs else '{}',
-            0,
         ))
 
     conn.executemany(
         """INSERT INTO md
            (root, file, line_start, line_end, pos_in_file, parent_pos,
-            depth, type, content, attrs_json, version)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            depth, type, content, attrs_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         rows,
     )
     conn.commit()

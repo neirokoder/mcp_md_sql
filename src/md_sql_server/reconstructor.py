@@ -37,7 +37,7 @@ def _render_row(row: dict[str, Any]) -> str:
 
 def _render_element(row: dict[str, Any]) -> str:
     """Render one row to Markdown text."""
-    t = row.get('type', row.get('type', ''))
+    t = row.get('type', '')
     content = row.get('content', '') or ''
     attrs = _parse_attrs(row.get('attrs_json', '{}'))
     depth = row.get('depth', 0)

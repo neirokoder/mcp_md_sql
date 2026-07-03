@@ -1,10 +1,18 @@
-## Готово ✅
+## Выполнено ✅
 
-Все пункты задания выполнены:
-1. Inline-элементы как отдельные строки таблицы
-2. UPDATE/DELETE inline-элементов → патч родителя
-3. parent_pos — корректное разрешение через _resolve_parents
-4. Reload файла после md_change (UPDATE/DELETE)
-5. Валидация INSERT без id/version
-6. Blockquote: убрано дублирование контента
-7. Тесты: parser (24), reconstructor (22), integration (11) — все проходят
+### Правки кода
+- `_render_element` — фикс двойного `get`
+- `_build_insert_sql` → параметризованный запрос, `_sql_quote` удалена
+- `_handle_update` — детерминированное отслеживание after-строк по `id`
+- `_handle_delete` — проверка `matched no rows`
+- `_validate_select` — запрет multi-statement
+- `_validate_dml` — `_extract_set_columns` вместо regex
+- `INSERT OR REPLACE` — поддержан (optional modifier в regex)
+- Поле `version` удалено из схемы, INSERT, UPDATE, валидации, тестов
+- `parse_doc_roots` — поддержка JSON-массива + fallback на legacy `;` формат
+- `server.py` — приём roots от IDE через MCP протокол (lazy при list_tools)
+
+### Тесты
+- 103 теста (все проходят, 0 warnings)
+- 30 типовых SELECT-запросов
+- DELETE, SELECT, config, _parse_attrs — граничные случаи и отказоустойчивость

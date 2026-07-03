@@ -51,10 +51,12 @@ def md_select(conn: sqlite3.Connection, sql: str) -> list[dict[str, Any]]:
 
 
 def _validate_select(sql: str) -> None:
-    """Ensure the statement is a SELECT only."""
+    """Ensure the statement is a single SELECT only."""
     stripped = sql.strip()
     if not re.match(r'^\s*SELECT\b', stripped, re.IGNORECASE):
         raise ToolError("Only SELECT queries are allowed in md_select")
+    if ';' in stripped[:-1] if stripped else False:
+        raise ToolError("Multiple statements are not allowed")
 
 
 # ── md_change ────────────────────────────────────────────────────────────────
@@ -79,7 +81,7 @@ def md_change(conn: sqlite3.Connection, sql: str) -> dict[str, Any]:
 
 
 def _validate_dml(sql: str) -> None:
-    """Reject DDL, transaction control, and direct id/version manipulation."""
+    """Reject DDL, transaction control, and direct id manipulation."""
     stripped = sql.strip().upper()
     if not any(stripped.startswith(w) for w in ('INSERT', 'UPDATE', 'DELETE')):
         raise ToolError("Only INSERT, UPDATE, DELETE are allowed in md_change")
@@ -90,17 +92,15 @@ def _validate_dml(sql: str) -> None:
     if FORBIDDEN_TXN.search(sql):
         raise ToolError("Transaction control (BEGIN, COMMIT, ROLLBACK) is not allowed")
 
-    # Check for direct id/version manipulation in SET (UPDATE)
-    if re.search(r'\bSET\b.*\bid\s*=', sql, re.IGNORECASE):
-        raise ToolError("Direct modification of `id` column is not allowed")
-    if re.search(r'\bSET\b.*\bversion\s*=', sql, re.IGNORECASE):
-        raise ToolError("Direct modification of `version` column is not allowed")
-    # INSERT: reject if `id` or `version` appear in the column list
+    # Check for direct id manipulation in SET (UPDATE)
+    if sql.strip().upper().startswith('UPDATE'):
+        set_cols = _extract_set_columns(sql)
+        if 'id' in set_cols:
+            raise ToolError("Direct modification of `id` column is not allowed")
+    # INSERT: reject if `id` appears in the column list
     insert_cols = _extract_insert_columns(sql)
     if 'id' in insert_cols:
         raise ToolError("Direct insertion of `id` column is not allowed")
-    if 'version' in insert_cols:
-        raise ToolError("Direct insertion of `version` column is not allowed")
 
 
 def _detect_operation(sql: str) -> str:
@@ -116,10 +116,26 @@ def _detect_operation(sql: str) -> str:
 
 def _extract_insert_columns(sql: str) -> set[str]:
     """Extract column names from INSERT INTO ... (col1, col2) ..."""
-    m = re.search(r'INSERT\s+INTO\s+\w+\s*\(([^)]+)\)', sql, re.IGNORECASE)
+    m = re.search(r'INSERT\s+(?:OR\s+\w+\s+)?INTO\s+\w+\s*\(([^)]+)\)', sql, re.IGNORECASE)
     if not m:
         return set()
     return {c.strip().lower() for c in m.group(1).split(',')}
+
+
+def _extract_set_columns(sql: str) -> set[str]:
+    """Extract column names from UPDATE ... SET col=val, col2=val2 ... ."""
+    m = re.search(r'\bSET\b\s+(.+?)(\bWHERE\b|$)', sql, re.IGNORECASE | re.DOTALL)
+    if not m:
+        return set()
+    set_clause = m.group(1)
+    cols: set[str] = set()
+    for part in set_clause.split(','):
+        eq = part.strip().split('=', 1)
+        if eq:
+            col = eq[0].strip().lower()
+            if col and col != '?':
+                cols.add(col)
+    return cols
 
 
 def _set_timeout(conn: sqlite3.Connection) -> None:
@@ -161,10 +177,25 @@ def _handle_insert(conn: sqlite3.Connection, sql: str) -> dict[str, Any]:
     # Shift existing elements
     _shift_positions(conn, root, file, target_pos, +1)
 
-    # Build INSERT statement with version=0
-    # We need to construct the actual INSERT
-    actual_sql = _build_insert_sql(sql, values, target_pos)
-    conn.execute(actual_sql)
+    # Parameterised INSERT — no SQL concatenation
+    conn.execute(
+        """INSERT INTO md
+           (root, file, line_start, line_end, pos_in_file, parent_pos,
+            depth, type, content, attrs_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            values.get('root'),
+            values.get('file'),
+            values.get('line_start'),
+            values.get('line_end'),
+            target_pos,
+            values.get('parent_pos'),
+            values.get('depth', 0),
+            values.get('type'),
+            values.get('content'),
+            values.get('attrs_json', '{}'),
+        ),
+    )
     new_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
     # Get the newly inserted row
@@ -200,9 +231,9 @@ def _parse_insert_values(sql: str) -> dict[str, Any]:
 
     Returns dict of column -> value for basic INSERT statements.
     """
-    # Match: INSERT INTO md (col1, col2, ...) VALUES (val1, val2, ...)
+    # Match: INSERT [OR REPLACE] INTO md (col1, col2, ...) VALUES (val1, val2, ...)
     m = re.search(
-        r"INSERT\s+INTO\s+\S+\s*\(([^)]+)\)\s*VALUES\s*\((.+)\)",
+        r"INSERT\s+(?:OR\s+\w+\s+)?INTO\s+\S+\s*\(([^)]+)\)\s*VALUES\s*\((.+)\)",
         sql, re.IGNORECASE | re.DOTALL,
     )
     if not m:
@@ -264,40 +295,6 @@ def _unquote(val: str) -> Any:
     if val.upper() == 'NULL':
         return None
     return val
-
-
-def _build_insert_sql(original_sql: str, values: dict, pos: int) -> str:
-    """Build actual INSERT SQL with version=0 and proper pos_in_file."""
-    # For simplicity, we reconstruct the INSERT
-    cols = ['root', 'file', 'line_start', 'line_end', 'pos_in_file',
-            'parent_pos', 'depth', 'type', 'content', 'attrs_json', 'version']
-    actual_values = {
-        'root': values.get('root'),
-        'file': values.get('file'),
-        'line_start': values.get('line_start'),
-        'line_end': values.get('line_end'),
-        'pos_in_file': pos,
-        'parent_pos': values.get('parent_pos'),
-        'depth': values.get('depth', 0),
-        'type': values.get('type'),
-        'content': values.get('content'),
-        'attrs_json': values.get('attrs_json', '{}'),
-        'version': 0,
-    }
-    # Build column list and value list
-    col_list = ', '.join(cols)
-    val_list = ', '.join(_sql_quote(actual_values[c]) for c in cols)
-    return f"INSERT INTO md ({col_list}) VALUES ({val_list})"
-
-
-def _sql_quote(val: Any) -> str:
-    """Convert a Python value to SQL literal."""
-    if val is None:
-        return 'NULL'
-    if isinstance(val, (int, float)):
-        return str(val)
-    escaped = str(val).replace("'", "''")
-    return f"'{escaped}'"
 
 
 def _shift_positions(conn: sqlite3.Connection, root: str, file: str,
@@ -370,15 +367,19 @@ def _handle_update(conn: sqlite3.Connection, sql: str) -> dict[str, Any]:
     ).fetchall()
     before_map = {row['id']: dict(row) for row in before_rows}
 
-    # Track max version before update
-    max_ver_before = conn.execute("SELECT COALESCE(MAX(version), 0) FROM md").fetchone()[0]
+    if not before_rows:
+        raise ToolError("UPDATE matched no rows")
 
-    # Execute UPDATE with version bump
-    conn.execute(f"UPDATE md SET version = version + 1, {_strip_set(sql)} WHERE {where_clause}")
-    
-    # After state — rows with version > max_ver_before
+    # Track affected IDs for after-state selection
+    affected_ids = [row['id'] for row in before_rows]
+
+    # Execute UPDATE
+    placeholders = ', '.join('?' * len(affected_ids))
+    conn.execute(f"UPDATE md SET {_strip_set(sql)} WHERE {where_clause}")
+
+    # After state — same rows by id (deterministic, not relying on version)
     after_rows = conn.execute(
-        "SELECT * FROM md WHERE version > ?", (max_ver_before,)
+        f"SELECT * FROM md WHERE id IN ({placeholders})", affected_ids
     ).fetchall()
     after_map = {row['id']: dict(row) for row in after_rows}
 
@@ -607,6 +608,9 @@ def _handle_delete(conn: sqlite3.Connection, sql: str) -> dict[str, Any]:
     before_rows = conn.execute(
         f"SELECT * FROM md WHERE {where_clause}"
     ).fetchall()
+
+    if not before_rows:
+        raise ToolError("DELETE matched no rows")
 
     # Build diff and organize by file
     changes = []

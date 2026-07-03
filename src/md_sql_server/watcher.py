@@ -111,8 +111,5 @@ class FileWatcher:
         handler = self.handlers.get(root)
         if handler is None:
             return
-        for cfg in get_doc_roots():
-            if cfg.alias == root:
-                full_path = str(cfg.path / file).replace('\\', '/')
-                handler.ignore_path(full_path, duration_sec)
-                return
+        full_path = str(handler.root_config.path / file).replace('\\', '/')
+        handler.ignore_path(full_path, duration_sec)

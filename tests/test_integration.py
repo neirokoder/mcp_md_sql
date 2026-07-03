@@ -77,7 +77,7 @@ Updates a user.
         assert any('Returns list of users' in c for c in contents), f"Paragraphs: {contents}"
         print("✅ md_select: paragraphs OK")
 
-        return True
+        return
 
 
 def test_parse_inline_elements():
@@ -120,7 +120,7 @@ def test_parse_inline_elements():
         assert code_rows[0]['parent_pos'] == rows[0]['pos_in_file']
 
         print("✅ test_parse_inline_elements PASSED")
-        return True
+        return
 
 
 def test_md_change_update():
@@ -175,7 +175,7 @@ Removes a user.
         assert rows[0]['line_start'] is not None
         print("✅ md_change UPDATE: DB reloaded OK")
 
-        return True
+        return
 
 
 def test_md_change_delete():
@@ -212,7 +212,7 @@ Old method.
         assert 'DELETE /users' not in new_content or 'delete' in new_content.lower()
         print("✅ md_change DELETE: file patched OK")
 
-        return True
+        return
 
 
 def test_md_change_insert():
@@ -251,7 +251,7 @@ List users.
         assert 'New paragraph' in new_content
         print("✅ md_change INSERT: file patched OK")
 
-        return True
+        return
 
 
 def test_insert_rejects_id():
@@ -277,33 +277,9 @@ def test_insert_rejects_id():
             assert 'id' in str(e).lower()
             print(f"✅ test_insert_rejects_id PASSED: {e}")
 
-        return True
+        return
 
 
-def test_insert_rejects_version():
-    """Test: INSERT with `version` column is rejected."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        root = Path(tmpdir)
-        docs_dir = root / "docs"
-        docs_dir.mkdir()
-        test_file = docs_dir / "test.md"
-        test_file.write_text("# Test\n", encoding='utf-8')
-
-        conn = get_connection()
-        roots = [RootConfig(alias="project", path=root)]
-        set_roots(roots)
-        load_files(conn, roots)
-
-        try:
-            md_change(conn,
-                "INSERT INTO md (version, root, file, type, content) "
-                "VALUES (5, 'project', 'docs/test.md', 'paragraph', 'bad')")
-            assert False, "Should have raised ToolError"
-        except ToolError as e:
-            assert 'version' in str(e).lower()
-            print(f"✅ test_insert_rejects_version PASSED: {e}")
-
-        return True
 
 
 def test_mass_update():
@@ -343,7 +319,7 @@ More old content.
         assert 'new' in new_content.lower()
         print("✅ test_mass_update: file verified")
 
-        return True
+        return
 
 
 def test_insert_with_position_shift():
@@ -392,7 +368,7 @@ First paragraph.
         print(f"  After: {[r['pos_in_file'] for r in after]}")
         print("✅ test_insert_with_position_shift PASSED")
 
-        return True
+        return
 
 
 def test_update_inline_element():
@@ -427,7 +403,7 @@ def test_update_inline_element():
         assert '**world**' not in new_content
         print("✅ test_update_inline_element: file patched OK")
 
-        return True
+        return
 
 
 def test_delete_inline_element():
@@ -461,7 +437,131 @@ def test_delete_inline_element():
         assert 'today' in new_content
         print(f"✅ test_delete_inline_element: file patched OK, content: {new_content!r}")
 
-        return True
+        return
+
+
+def test_insert_with_special_chars():
+    """Test: INSERT with quotes in content doesn't break."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        test_file = root / "special.md"
+        test_file.write_text("# Title\n", encoding='utf-8')
+
+        conn = get_connection()
+        roots = [RootConfig(alias="project", path=root)]
+        set_roots(roots)
+        load_files(conn, roots)
+
+        # INSERT with single quotes and special chars in content
+        result = md_change(conn,
+            "INSERT INTO md (root, file, type, content, depth) "
+            "VALUES ('project', 'special.md', 'paragraph', \"It's a 'test'\", 0)")
+        assert len(result['changes']) == 1
+        assert result['changes'][0]['operation'] == 'insert'
+        print("test_insert_with_special_chars PASSED")
+
+        return
+
+
+def test_update_rejects_direct_id():
+    """Test: UPDATE SET id = ... is rejected."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        docs_dir = root / "docs"
+        docs_dir.mkdir()
+        test_file = docs_dir / "test.md"
+        test_file.write_text("# Title\n", encoding='utf-8')
+
+        conn = get_connection()
+        roots = [RootConfig(alias="project", path=root)]
+        set_roots(roots)
+        load_files(conn, roots)
+
+        error = None
+        try:
+            md_change(conn,
+                "UPDATE md SET id = 99 WHERE type = 'heading'")
+        except ToolError as e:
+            error = e
+
+        assert error is not None, "Expected ToolError for SET id"
+        assert 'id' in str(error).lower()
+        print("test_update_rejects_direct_id PASSED")
+
+        return
+
+
+
+
+def test_update_allows_id_in_string():
+    """Test: UPDATE SET content = 'user_id=5' is NOT rejected (id in string literal)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        docs_dir = root / "docs"
+        docs_dir.mkdir()
+        test_file = docs_dir / "test.md"
+        test_file.write_text("# Old Title\n", encoding='utf-8')
+
+        conn = get_connection()
+        roots = [RootConfig(alias="project", path=root)]
+        set_roots(roots)
+        load_files(conn, roots)
+
+        # Should NOT raise - 'id' is inside a string literal, not a column name
+        result = md_change(conn,
+            "UPDATE md SET content = 'user_id=5' WHERE type = 'heading'")
+        assert len(result['changes']) >= 1
+        print("test_update_allows_id_in_string PASSED")
+
+        return
+
+
+def test_update_tracks_freshly_inserted_row():
+    """Test: UPDATE on a freshly inserted row is tracked in diff
+    regardless of updates to other rows (deterministic id-based tracking)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        file_a = root / "a.md"
+        file_b = root / "b.md"
+        file_a.write_text("# From A\n", encoding='utf-8')
+        file_b.write_text("# From B\n", encoding='utf-8')
+
+        conn = get_connection()
+        roots = [RootConfig(alias="project", path=root)]
+        set_roots(roots)
+        load_files(conn, roots)
+
+        # Step 1: UPDATE file_a
+        r1 = md_change(conn,
+            "UPDATE md SET content = 'Modified A' WHERE root = 'project' AND file = 'a.md' AND type = 'heading'")
+        assert len(r1['changes']) == 1
+
+        # Step 2: INSERT a new element INTO a.md
+        r2 = md_change(conn,
+            "INSERT INTO md (root, file, type, content, depth) "
+            "VALUES ('project', 'a.md', 'paragraph', 'New in A', 0)")
+        assert len(r2['changes']) == 1
+
+        # Step 3: UPDATE file_b only
+        r3 = md_change(conn,
+            "UPDATE md SET content = 'Modified B' WHERE root = 'project' AND file = 'b.md' AND type = 'heading'")
+        assert len(r3['changes']) == 1
+
+        # Step 4: UPDATE the freshly inserted row in a.md
+        # Must produce exactly 1 change (deterministic by id, not fragile version check)
+        result = md_change(conn,
+            "UPDATE md SET content = 'Updated New In A' WHERE root = 'project' AND file = 'a.md' AND type = 'paragraph'")
+        changes = result['changes']
+        print(f"changes: {changes}")
+        assert len(changes) == 1, (
+            f"Expected 1 change for the freshly inserted row, got {len(changes)}. "
+            "BUG: version-based tracking missed the row because max_ver_before > 0 but freshly inserted row has version=0"
+        )
+        assert changes[0]['old_content'] == 'New in A'
+        assert changes[0]['new_content'] == 'Updated New In A'
+        print("test_update_tracks_freshly_inserted_row PASSED")
+
+        return
 
 
 if __name__ == '__main__':
@@ -471,9 +571,12 @@ if __name__ == '__main__':
     test_md_change_delete()
     test_md_change_insert()
     test_insert_rejects_id()
-    test_insert_rejects_version()
     test_mass_update()
     test_insert_with_position_shift()
     test_update_inline_element()
     test_delete_inline_element()
-    print("\n🎉 All integration tests passed!")
+    test_insert_with_special_chars()
+    test_update_rejects_direct_id()
+    test_update_allows_id_in_string()
+    test_update_tracks_freshly_inserted_row()
+    print("\nAll integration tests passed!")
