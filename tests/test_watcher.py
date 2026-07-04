@@ -9,8 +9,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 import pytest
 
-from md_sql_server.config import RootConfig
-from md_sql_server.database import get_connection, create_db
+from mcp_md_sql.config import RootConfig
+from mcp_md_sql.database import get_connection, create_db
 
 
 class _FakeEvent:
@@ -22,7 +22,7 @@ class _FakeEvent:
 
 
 def _make_handler(conn, tmpdir):
-    from md_sql_server.watcher import _MdHandler
+    from mcp_md_sql.watcher import _MdHandler
     cfg = RootConfig(alias='test', path=tmpdir)
     return _MdHandler(conn, cfg)
 

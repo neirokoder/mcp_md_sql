@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
-from md_sql_server.reconstructor import reconstruct, render_single
+from mcp_md_sql.reconstructor import reconstruct, render_single
 
 
 def test_render_heading():

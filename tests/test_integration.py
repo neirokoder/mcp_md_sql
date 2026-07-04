@@ -12,9 +12,9 @@ import pytest
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
-from md_sql_server.config import RootConfig, set_roots
-from md_sql_server.database import get_connection, create_db, load_files, reload_file
-from md_sql_server.tools import md_select, md_change, ToolError
+from mcp_md_sql.config import RootConfig, set_roots
+from mcp_md_sql.database import get_connection, create_db, load_files, reload_file
+from mcp_md_sql.tools import md_select, md_change, ToolError
 
 
 def test_parse_and_select():

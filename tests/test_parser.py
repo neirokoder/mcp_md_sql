@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
-from md_sql_server.parser import parse, ParsedElement
+from mcp_md_sql.parser import parse, ParsedElement
 
 
 def test_basic_heading():

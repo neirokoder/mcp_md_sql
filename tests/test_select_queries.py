@@ -10,10 +10,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 import pytest
 
-from md_sql_server.config import RootConfig, set_roots, parse_doc_roots
-from md_sql_server.database import get_connection, load_files
-from md_sql_server.reconstructor import _parse_attrs
-from md_sql_server.tools import md_select, md_change, ToolError
+from mcp_md_sql.config import RootConfig, set_roots, parse_doc_roots
+from mcp_md_sql.database import get_connection, load_files
+from mcp_md_sql.reconstructor import _parse_attrs
+from mcp_md_sql.tools import md_select, md_change, ToolError
 
 
 # ── Fixture ────────────────────────────────────────────────────────────────────
@@ -484,7 +484,7 @@ def test_progress_handler_interrupts():
 def test_set_timeout_mechanism(monkeypatch):
     """_set_timeout sets a deadline-based progress handler that interrupts."""
     import time
-    from md_sql_server.tools import _set_timeout
+    from mcp_md_sql.tools import _set_timeout
 
     conn = get_connection()
 
@@ -512,8 +512,8 @@ def test_set_timeout_mechanism(monkeypatch):
 
 def test_update_nonexistent_file(monkeypatch):
     """UPDATE on file that doesn't exist on disk → ToolError."""
-    from md_sql_server.config import RootConfig, set_roots, get_doc_roots
-    from md_sql_server.database import get_connection, load_files
+    from mcp_md_sql.config import RootConfig, set_roots, get_doc_roots
+    from mcp_md_sql.database import get_connection, load_files
     import tempfile
 
     conn = get_connection()
@@ -536,8 +536,8 @@ def test_update_nonexistent_file(monkeypatch):
 
 def test_delete_nonexistent_file(monkeypatch):
     """DELETE that matches rows but file is missing → ToolError."""
-    from md_sql_server.config import RootConfig, set_roots
-    from md_sql_server.database import get_connection, load_files
+    from mcp_md_sql.config import RootConfig, set_roots
+    from mcp_md_sql.database import get_connection, load_files
     import tempfile
 
     conn = get_connection()

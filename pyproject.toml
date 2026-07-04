@@ -1,5 +1,5 @@
 [project]
-name = "md-sql"
+name = "mcp-md-sql"
 version = "0.1.0"
 description = "MCP server for working with Markdown documentation as a relational database"
 requires-python = ">=3.11"
@@ -8,9 +8,6 @@ dependencies = [
     "watchdog>=6.0",
     "mcp>=1.0",
 ]
-
-[project.scripts]
-md-sql = "md_sql_server.server:main"
 
 [build-system]
 requires = ["setuptools>=68"]

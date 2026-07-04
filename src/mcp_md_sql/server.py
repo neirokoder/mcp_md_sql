@@ -37,8 +37,14 @@ def _format_select_result(rows: list[dict]) -> str:
         file_ = r.get('file', '')
         root_prefix = f'{root}/\n' if root else ''
 
-        parts = [f'line: {r.get("line_start", "?")}-{r.get("line_end", "?")}',
-                 f'pos: {r.get("pos_in_file", "?")}']
+        ls = r.get('line_start')
+        le = r.get('line_end')
+        parts = []
+        if ls is not None:
+            parts.append(f'line: {ls}-{le}')
+        pif = r.get('pos_in_file')
+        if pif is not None:
+            parts.append(f'pos: {pif}')
         parent = r.get('parent_pos')
         if parent is not None:
             parts.append(f'parent: {parent}')
@@ -90,13 +96,11 @@ async def _try_load_roots(session) -> list[RootConfig] | None:
         from urllib.parse import urlparse
         from urllib.request import url2pathname
 
-        from mcp.types import ListRootsRequest, ListRootsResult
-
-        result = await session.send_request(
-            ListRootsRequest(method="roots/list"),
-            ListRootsResult,
-        )
+        import asyncio
+        logger.info("Requesting roots from IDE...")
+        result = await asyncio.wait_for(session.list_roots(), timeout=2.0)
         if not result.roots:
+            logger.info("IDE returned no roots")
             return None
         roots = []
         for r in result.roots:
@@ -107,8 +111,13 @@ async def _try_load_roots(session) -> list[RootConfig] | None:
             else:
                 path = Path(str(r.uri))
             roots.append(RootConfig(alias=alias, path=path.resolve()))
+        logger.info("Got %d root(s) from IDE: %s", len(roots), [r.path for r in roots])
         return roots
-    except Exception:
+    except asyncio.TimeoutError:
+        logger.warning("IDE did not respond to roots/list request within 2s — using fallback")
+        return None
+    except Exception as e:
+        logger.warning("Failed to get roots from IDE: %s", e)
         return None
 
 
@@ -118,6 +127,7 @@ def _build_server() -> Server:
 
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:
+        logger.info("list_tools called — checking IDE roots")
         # First call: try to load roots from IDE
         try:
             ctx = server.request_context

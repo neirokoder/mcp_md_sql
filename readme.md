@@ -6,7 +6,7 @@ MCP-сервер для работы с Markdown-документацией ка
 
 ```bash
 pip install -e .
-DOC_ROOTS='["/path/to/docs"]' md-sql
+DOC_ROOTS='["/path/to/docs"]' python -m mcp_md_sql.server
 ```
 
 ## Подключение к MCP-клиенту
@@ -16,11 +16,9 @@ DOC_ROOTS='["/path/to/docs"]' md-sql
 ```json
 {
   "mcp_servers": {
-    "md-sql": {
-      "command": "md-sql",
-      "env": {
-        "DOC_ROOTS": "[\"/path/to/docs\"]"
-      }
+    "sql-mcp": {
+      "command": "python",
+      "args": ["-m", "mcp_md_sql.server"]
     }
   }
 }
@@ -31,11 +29,9 @@ DOC_ROOTS='["/path/to/docs"]' md-sql
 ```json
 {
   "mcpServers": {
-    "md-sql": {
-      "command": "md-sql",
-      "env": {
-        "DOC_ROOTS": "[\"/path/to/docs\"]"
-      }
+    "sql-mcp": {
+      "command": "python",
+      "args": ["-m", "mcp_md_sql.server"]
     }
   }
 }
@@ -101,7 +97,7 @@ SELECT * FROM md WHERE type = 'heading' AND depth = 0
 ## Структура проекта
 
 ```
-src/md_sql_server/
+src/mcp_md_sql/
 ├── config.py         # DOC_ROOTS → RootConfig
 ├── parser.py         # Парсинг .md через mistune → flat list
 ├── database.py       # SQLite in-memory: схема, загрузка, reload

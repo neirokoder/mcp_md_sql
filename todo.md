@@ -1,17 +1,21 @@
-# Сделано
+# План: три архитектурных дефекта
 
-## Тесты
-- [x] Таймаут: progress_handler напрямую + `_set_timeout` через monkeypatch
-- [x] Frontmatter: парсинг YAML frontmatter + реконструкция
-- [x] Вложенные списки: 2 уровня + 3 уровня + вложенный paragraph
-- [x] ФС-ошибки: ToolError при отсутствии файла для UPDATE и DELETE
+## Очередность
 
-## Улучшение _patch_file_insert
-- [x] Проверка целостности: размер файла, контекст строк до/после вставки
+1. **server.py** — `_format_select_result`: +extra-колонки как JSON-блок
+2. **tools.py** — `_split_values`: depth скобок + кавычки
+3. **tools.py** — `_handle_insert`: exec подзапроса для pos_in_file
+4. **tools.py** — `_handle_update`: убрать reload, сдвиг line_start/line_end
+5. **tools.py** — `_handle_delete`: reload + preserve ids
+6. Тесты: обновить существующие, добавить новые
 
-## 20 сложных сценариев (test_scenarios.py)
-- [x] 5 сложных .md документов в tests/fixtures/complex/
-- [x] 10 SELECT-сценариев: TOC, code langs, tables, links, keyword search, frontmatter, stats, nested lists, hierarchy, complexity
-- [x] 6 CHANGE-сценариев: mass rename, bulk update, delete section, insert paragraph/table, delete inline
-- [x] 4 CHAIN-сценария: full lifecycle, complex UPDATE with json_extract, delete nested items, insert special chars
-- [x] Все сценарии через `_handle_call_tool` (реальный серверный dispatch)
+## Статус
+
+- [x] План утверждён
+- [x] 1. `_format_select_result` — extra-колонки
+- [x] 2. `_split_values` — depth скобок
+- [x] 3. `_handle_insert` — exec подзапроса
+- [x] 4. `_handle_update` — без reload, shift line_start
+- [x] 5. `_handle_delete` — reload + preserve ids
+- [x] 6. Обновить тесты
+- [x] 7. Прогнать тесты

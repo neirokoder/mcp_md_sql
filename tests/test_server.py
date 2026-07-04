@@ -10,10 +10,10 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
-from md_sql_server import server as srv
-from md_sql_server.config import RootConfig, set_roots
-from md_sql_server.database import get_connection, load_files
-from md_sql_server.tools import ToolError
+from mcp_md_sql import server as srv
+from mcp_md_sql.config import RootConfig, set_roots
+from mcp_md_sql.database import get_connection, load_files
+from mcp_md_sql.tools import ToolError
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -168,6 +168,18 @@ class TestFormatSelectResult:
         result = srv._format_select_result(rows)
         assert result.count('{"cnt": 3}') == 1
         assert result.count('{"cnt": 7}') == 1
+
+    def test_null_or_missing_line_fields(self):
+        """NULL line_start/line_end/pos_in_file не выводятся."""
+        rows = [{
+            'root': 'r', 'file': 'f.md',
+            'line_start': None, 'line_end': None,
+            'pos_in_file': None, 'parent_pos': None, 'depth': 0,
+            'type': 'heading', 'content': '# Nulls',
+        }]
+        result = srv._format_select_result(rows)
+        assert 'line:' not in result, f"Got: {result}"
+        assert 'pos:' not in result, f"Got: {result}"
 
 
 # ── integration: _handle_call_tool ───────────────────────────────────────────
