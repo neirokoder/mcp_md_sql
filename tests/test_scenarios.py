@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 from mcp_md_sql import server as srv
 from mcp_md_sql.config import RootConfig, set_roots
 from mcp_md_sql.database import get_connection, load_files
+from mcp_md_sql.tools import set_root_config
 from mcp_md_sql.watcher import FileWatcher
 
 
@@ -31,33 +32,23 @@ from mcp_md_sql.watcher import FileWatcher
 FIXTURE_DIR = Path(__file__).parent / 'fixtures' / 'complex'
 
 
-def _setup_server(tmpdir: Path) -> None:
-    """Copy fixtures to tmpdir and init server globals (like run_server())."""
+def _setup_server(tmpdir: Path) -> tuple[sqlite3.Connection, srv._ServerState]:
+    """Copy fixtures to tmpdir, create connection + state for testing."""
     shutil.copytree(FIXTURE_DIR, tmpdir / 'complex', dirs_exist_ok=True)
 
-    srv._conn = get_connection()
+    conn = get_connection()
     cfg = RootConfig(alias="project", path=tmpdir)
     set_roots([cfg])
-    load_files(srv._conn, [cfg])
-    srv._roots_loaded = True
-    # Watcher needed for md_change's ignore_path call (no threads started)
-    srv._watcher = FileWatcher(srv._conn)
+    set_root_config("project", cfg)
+    load_files(conn, [cfg])
 
+    # Create server state with watcher (needed for md_change ignore_path)
+    state = srv._ServerState()
+    state.databases["project"] = conn
+    watcher = FileWatcher(conn)
+    state.watchers["project"] = watcher
 
-def _cleanup_server() -> None:
-    srv._conn = None
-    if srv._watcher is not None:
-        if srv._watcher.handlers:
-            srv._watcher.stop()
-    srv._watcher = None
-    srv._roots_loaded = False
-
-
-@pytest.fixture(autouse=True)
-def _reset_server():
-    _cleanup_server()
-    yield
-    _cleanup_server()
+    return conn, state
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -69,7 +60,7 @@ def _reset_server():
 async def test_select_toc():
     """S1: TOC — select all headings from api_docs with depth & level."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        _setup_server(Path(tmpdir))
+        conn, state = conn, state = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
@@ -77,7 +68,7 @@ async def test_select_toc():
                 "FROM md WHERE file='complex/api_docs.md' AND type='heading' "
                 "ORDER BY pos_in_file"
             ),
-        })
+        }, conn, state)
         text = result[0].text
         assert 'Error:' not in text, f"Unexpected error: {text}"
         # Verify all expected headings appear
@@ -93,7 +84,7 @@ async def test_select_toc():
 async def test_select_code_languages():
     """S2: Code blocks across all files — verify content from different languages."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        _setup_server(Path(tmpdir))
+        conn, state = conn, state = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
@@ -102,7 +93,7 @@ async def test_select_code_languages():
                 "AND json_extract(attrs_json, '$.lang') IS NOT NULL "
                 "ORDER BY file, pos_in_file"
             ),
-        })
+        }, conn, state)
         text = result[0].text
         assert 'Error:' not in text
         # Check code snippets from different languages appear in output
@@ -118,14 +109,14 @@ async def test_select_code_languages():
 async def test_select_table_inventory():
     """S3: Find all tables with file and content preview."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        _setup_server(Path(tmpdir))
+        conn, state = conn, state = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
                 "SELECT type, file, content "
                 "FROM md WHERE type='table' ORDER BY file, pos_in_file"
             ),
-        })
+        }, conn, state)
         text = result[0].text
         assert 'Error:' not in text
         table_count = text.count('type: table')
@@ -139,7 +130,7 @@ async def test_select_table_inventory():
 async def test_select_link_audit():
     """S4: Link audit — all links (inline, so depth>0) with URLs."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        _setup_server(Path(tmpdir))
+        conn, state = conn, state = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
@@ -147,7 +138,7 @@ async def test_select_link_audit():
                 "FROM md WHERE type='link' "
                 "ORDER BY content"
             ),
-        })
+        }, conn, state)
         text = result[0].text
         assert 'Error:' not in text
         # Inline links have depth > 0, content contains link text
@@ -162,7 +153,7 @@ async def test_select_link_audit():
 async def test_select_keyword_search():
     """S5: Search paragraphs containing specific keywords across files."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        _setup_server(Path(tmpdir))
+        conn, state = conn, state = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
@@ -170,7 +161,7 @@ async def test_select_keyword_search():
                 "WHERE type='paragraph' AND "
                 "(content LIKE '%Congrat%' OR content LIKE '%quick start%')"
             ),
-        })
+        }, conn, state)
         text = result[0].text
         assert 'Error:' not in text
         assert 'Congrat' in text or 'quick start' in text
@@ -181,14 +172,14 @@ async def test_select_keyword_search():
 async def test_select_frontmatter():
     """S6: Frontmatter extraction — all 5 files have frontmatter with metadata."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        _setup_server(Path(tmpdir))
+        conn, state = conn, state = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
                 "SELECT type, content, file FROM md WHERE type='frontmatter' "
                 "ORDER BY file"
             ),
-        })
+        }, conn, state)
         text = result[0].text
         assert 'Error:' not in text
         # All 5 files should be present
@@ -206,14 +197,14 @@ async def test_select_frontmatter():
 async def test_select_cross_file_stats():
     """S7: Cross-file element counts by type across all 5 documents."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        _setup_server(Path(tmpdir))
+        conn, state = conn, state = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
                 "SELECT type, file, content FROM md WHERE depth=0 "
                 "ORDER BY type, file, pos_in_file"
             ),
-        })
+        }, conn, state)
         text = result[0].text
         assert 'Error:' not in text
         h_cnt = text.count('type: heading')
@@ -231,7 +222,7 @@ async def test_select_cross_file_stats():
 async def test_select_nested_list_depth():
     """S8: Nested list items at depth>0 in configuration_guide."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        _setup_server(Path(tmpdir))
+        conn, state = conn, state = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
@@ -240,7 +231,7 @@ async def test_select_nested_list_depth():
                 "AND file='complex/configuration_guide.md' AND depth>0 "
                 "ORDER BY pos_in_file"
             ),
-        })
+        }, conn, state)
         text = result[0].text
         assert 'Error:' not in text
         nested_items = text.count('type: list_item')
@@ -254,7 +245,7 @@ async def test_select_nested_list_depth():
 async def test_select_heading_hierarchy():
     """S9: Heading hierarchy by level in technical_spec (no parent_pos for headings)."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        _setup_server(Path(tmpdir))
+        conn, state = conn, state = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
@@ -263,7 +254,7 @@ async def test_select_heading_hierarchy():
                 "AND file='complex/technical_spec.md' "
                 "ORDER BY pos_in_file"
             ),
-        })
+        }, conn, state)
         text = result[0].text
         assert 'Error:' not in text
         assert 'Introduction' in text
@@ -280,7 +271,7 @@ async def test_select_heading_hierarchy():
 async def test_select_complexity_ranking():
     """S10: List items across files with depth info for complexity analysis."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        _setup_server(Path(tmpdir))
+        conn, state = conn, state = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
@@ -288,7 +279,7 @@ async def test_select_complexity_ranking():
                 "FROM md WHERE type='list_item' "
                 "ORDER BY file, depth DESC, pos_in_file"
             ),
-        })
+        }, conn, state)
         text = result[0].text
         assert 'Error:' not in text
         assert 'complex/configuration_guide.md' in text
@@ -308,14 +299,14 @@ async def test_change_mass_rename_heading():
     """S11: Mass rename — UPDATE 'Guide' → 'Manual' in all headings across files."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tdir = Path(tmpdir)
-        _setup_server(tdir)
+        conn, state = _setup_server(tdir)
 
         result = await srv._handle_call_tool('md_change', {
             'sql': (
                 "UPDATE md SET content = REPLACE(content, 'Guide', 'Manual') "
                 "WHERE type='heading' AND content LIKE '%Guide%'"
             ),
-        })
+        }, conn, state)
         text = result[0].text
         # Should succeed (JSON result, not Error:)
         assert 'Error:' not in text, f"Unexpected error: {text}"
@@ -336,14 +327,14 @@ async def test_change_bulk_paragraph_update():
     """S12: Bulk paragraph update — replace text in multiple paragraphs."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tdir = Path(tmpdir)
-        _setup_server(tdir)
+        conn, state = _setup_server(tdir)
 
         result = await srv._handle_call_tool('md_change', {
             'sql': (
                 "UPDATE md SET content = REPLACE(content, 'quick start', 'getting started') "
                 "WHERE type='paragraph' AND content LIKE '%quick start%'"
             ),
-        })
+        }, conn, state)
         text = result[0].text
         assert 'Error:' not in text, f"Unexpected error: {text}"
 
@@ -359,7 +350,7 @@ async def test_change_delete_section():
     """S13: DELETE a heading — removes 'Deprecated Endpoints' from api_docs."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tdir = Path(tmpdir)
-        _setup_server(tdir)
+        conn, state = _setup_server(tdir)
 
         # Verify heading exists before
         before = await srv._handle_call_tool('md_select', {
@@ -367,7 +358,7 @@ async def test_change_delete_section():
                 "SELECT type, content FROM md WHERE type='heading' "
                 "AND file='complex/api_docs.md' AND content='Deprecated Endpoints'"
             ),
-        })
+        }, conn, state)
         assert 'no results' not in before[0].text
 
         # Delete the heading
@@ -377,7 +368,7 @@ async def test_change_delete_section():
                 "AND content='Deprecated Endpoints' "
                 "AND file='complex/api_docs.md'"
             ),
-        })
+        }, conn, state)
         text = result[0].text
         assert 'Error:' not in text, f"Unexpected error: {text}"
 
@@ -392,7 +383,7 @@ async def test_change_insert_paragraph():
     """S14: INSERT a new paragraph at the end of an existing document."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tdir = Path(tmpdir)
-        _setup_server(tdir)
+        conn, state = _setup_server(tdir)
 
         # Get current max pos_in_file via a query the formatter can display
         pos_result = await srv._handle_call_tool('md_select', {
@@ -401,7 +392,7 @@ async def test_change_insert_paragraph():
                 "WHERE root='project' AND file='complex/api_docs.md' "
                 "ORDER BY pos_in_file DESC LIMIT 1"
             ),
-        })
+        }, conn, state)
         m = re.search(r'pos: (\d+)', pos_result[0].text)
         assert m, f"Cannot find pos in: {pos_result[0].text}"
         max_pos = int(m.group(1))
@@ -413,7 +404,7 @@ async def test_change_insert_paragraph():
                 f"VALUES ('project', 'complex/api_docs.md', {new_pos}, 0, "
                 f"'paragraph', 'Newly inserted paragraph for testing.', '{{}}')"
             ),
-        })
+        }, conn, state)
         text = result[0].text
         assert 'Error:' not in text, f"Unexpected error: {text}"
         data = json.loads(text)
@@ -430,7 +421,7 @@ async def test_change_insert_paragraph():
                 "SELECT type, content FROM md WHERE type='paragraph' "
                 "AND file='complex/api_docs.md' AND content LIKE '%Newly inserted%'"
             ),
-        })
+        }, conn, state)
         assert 'no results' not in verify[0].text
     print(f"✅ S14 PASSED: paragraph inserted at pos {new_pos}")
 
@@ -440,7 +431,7 @@ async def test_change_insert_table():
     """S15: INSERT a table element into configuration_guide."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tdir = Path(tmpdir)
-        _setup_server(tdir)
+        conn, state = _setup_server(tdir)
 
         # Get max position
         pos_result = await srv._handle_call_tool('md_select', {
@@ -449,7 +440,7 @@ async def test_change_insert_table():
                 "WHERE root='project' AND file='complex/configuration_guide.md' "
                 "ORDER BY pos_in_file DESC LIMIT 1"
             ),
-        })
+        }, conn, state)
         m = re.search(r'pos: (\d+)', pos_result[0].text)
         assert m, f"Cannot find pos in: {pos_result[0].text}"
         max_pos = int(m.group(1))
@@ -462,7 +453,7 @@ async def test_change_insert_table():
                 f"'table', '| Key | Value |\\\\n| --- | --- |\\\\n| timeout | 60s |\\\\n| retries | 3 |', "
                 f"'{{}}')"
             ),
-        })
+        }, conn, state)
         text = result[0].text
         assert 'Error:' not in text, f"Unexpected error: {text}"
 
@@ -477,7 +468,7 @@ async def test_change_delete_inline():
     """S16: DELETE an inline link element — removes link markup from parent."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tdir = Path(tmpdir)
-        _setup_server(tdir)
+        conn, state = _setup_server(tdir)
 
         # Delete the Python link from tutorial
         result = await srv._handle_call_tool('md_change', {
@@ -485,7 +476,7 @@ async def test_change_delete_inline():
                 "DELETE FROM md WHERE type='link' AND "
                 "json_extract(attrs_json, '$.url') = 'https://python.org'"
             ),
-        })
+        }, conn, state)
         text = result[0].text
         assert 'Error:' not in text, f"Unexpected error: {text}"
         data = json.loads(text)
@@ -508,7 +499,7 @@ async def test_chain_full_lifecycle():
     """S17: Full lifecycle — SELECT → INSERT → SELECT → UPDATE → SELECT → DELETE → SELECT."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tdir = Path(tmpdir)
-        _setup_server(tdir)
+        conn, state = _setup_server(tdir)
 
         # 1. Get max pos for end-of-file insertion
         pos_result = await srv._handle_call_tool('md_select', {
@@ -517,7 +508,7 @@ async def test_chain_full_lifecycle():
                 "WHERE root='project' AND file='complex/tutorial_quickstart.md' "
                 "ORDER BY pos_in_file DESC LIMIT 1"
             ),
-        })
+        }, conn, state)
         m = re.search(r'pos: (\d+)', pos_result[0].text)
         assert m, f"Cannot find pos in: {pos_result[0].text}"
         max_pos = int(m.group(1))
@@ -530,7 +521,7 @@ async def test_chain_full_lifecycle():
                 f"VALUES ('project', 'complex/tutorial_quickstart.md', {new_pos}, 0, "
                 f"'paragraph', 'Lifecycle test paragraph.', '{{}}')"
             ),
-        })
+        }, conn, state)
         text2 = step2[0].text
         assert 'Error:' not in text2
         data2 = json.loads(text2)
@@ -544,7 +535,7 @@ async def test_chain_full_lifecycle():
                 "AND file='complex/tutorial_quickstart.md' "
                 "AND content='Lifecycle test paragraph.'"
             ),
-        })
+        }, conn, state)
         assert 'no results' not in step3[0].text
 
         # 4. UPDATE the paragraph
@@ -553,7 +544,7 @@ async def test_chain_full_lifecycle():
                 "UPDATE md SET content = 'Lifecycle test paragraph — UPDATED' "
                 "WHERE content = 'Lifecycle test paragraph.'"
             ),
-        })
+        }, conn, state)
         text4 = step4[0].text
         assert 'Error:' not in text4
         data4 = json.loads(text4)
@@ -566,7 +557,7 @@ async def test_chain_full_lifecycle():
                 "AND file='complex/tutorial_quickstart.md' "
                 "AND content LIKE '%— UPDATED'"
             ),
-        })
+        }, conn, state)
         assert 'no results' not in step5[0].text
 
         # 6. DELETE the paragraph
@@ -576,7 +567,7 @@ async def test_chain_full_lifecycle():
                 "AND file='complex/tutorial_quickstart.md' "
                 "AND content LIKE '%— UPDATED'"
             ),
-        })
+        }, conn, state)
         text6 = step6[0].text
         assert 'Error:' not in text6
         data6 = json.loads(text6)
@@ -589,7 +580,7 @@ async def test_chain_full_lifecycle():
                 "AND file='complex/tutorial_quickstart.md' "
                 "AND content LIKE '%Lifecycle test%'"
             ),
-        })
+        }, conn, state)
         assert 'no results' in step7[0].text
 
         # Verify file on disk
@@ -603,7 +594,7 @@ async def test_chain_complex_update_with_json():
     """S18: Complex UPDATE with json_extract — update only JSON code blocks."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tdir = Path(tmpdir)
-        _setup_server(tdir)
+        conn, state = _setup_server(tdir)
 
         # Count JSON code blocks before
         before = await srv._handle_call_tool('md_select', {
@@ -612,7 +603,7 @@ async def test_chain_complex_update_with_json():
                 "WHERE type='code_block' AND "
                 "json_extract(attrs_json, '$.lang') = 'json'"
             ),
-        })
+        }, conn, state)
         json_count_before = before[0].text.count('type: code_block')
 
         # Update only JSON code blocks
@@ -621,7 +612,7 @@ async def test_chain_complex_update_with_json():
                 "UPDATE md SET content = REPLACE(content, 'Acme', 'Example') "
                 "WHERE type='code_block' AND json_extract(attrs_json, '$.lang') = 'json'"
             ),
-        })
+        }, conn, state)
         text = result[0].text
         if 'Error:' in text:
             # No JSON blocks matched — still valid, just verify zero changes
@@ -641,7 +632,7 @@ async def test_chain_delete_nested_items():
     """S19: DELETE nested list items (depth>0) while preserving top-level items."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tdir = Path(tmpdir)
-        _setup_server(tdir)
+        conn, state = _setup_server(tdir)
 
         # Delete all nested list items
         result = await srv._handle_call_tool('md_change', {
@@ -649,7 +640,7 @@ async def test_chain_delete_nested_items():
                 "DELETE FROM md WHERE type='list_item' AND depth>0 "
                 "AND file='complex/configuration_guide.md'"
             ),
-        })
+        }, conn, state)
         text = result[0].text
         assert 'Error:' not in text, f"Unexpected error: {text}"
         data = json.loads(text)
@@ -661,7 +652,7 @@ async def test_chain_delete_nested_items():
                 "SELECT type, content FROM md WHERE type='list_item' AND depth=0 "
                 "AND file='complex/configuration_guide.md'"
             ),
-        })
+        }, conn, state)
         assert 'no results' not in after[0].text, "Top-level items should remain"
 
         # Verify top-level list items still exist
@@ -670,7 +661,7 @@ async def test_chain_delete_nested_items():
                 "SELECT type, content FROM md WHERE type='list_item' AND depth=0 "
                 "AND file='complex/configuration_guide.md'"
             ),
-        })
+        }, conn, state)
         assert 'no results' not in after[0].text, "Top-level items should remain"
 
         # Verify nested items are gone from DB (file was correctly patched + reloaded)
@@ -679,7 +670,7 @@ async def test_chain_delete_nested_items():
                 "SELECT type, content FROM md WHERE type='list_item' AND depth>0 "
                 "AND file='complex/configuration_guide.md'"
             ),
-        })
+        }, conn, state)
         assert 'no results' in after_nested[0].text, "Nested items should be removed from DB"
     print(f"✅ S19 PASSED: {len(data['changes'])} nested items deleted")
 
@@ -689,7 +680,7 @@ async def test_chain_insert_special_chars():
     """S20: INSERT with Unicode and special chars — verify content preserved."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tdir = Path(tmpdir)
-        _setup_server(tdir)
+        conn, state = _setup_server(tdir)
 
         # Get max pos for end-of-file insertion
         pos_result = await srv._handle_call_tool('md_select', {
@@ -698,7 +689,7 @@ async def test_chain_insert_special_chars():
                 "WHERE root='project' AND file='complex/technical_spec.md' "
                 "ORDER BY pos_in_file DESC LIMIT 1"
             ),
-        })
+        }, conn, state)
         m = re.search(r'pos: (\d+)', pos_result[0].text)
         assert m, f"Cannot find pos in: {pos_result[0].text}"
         max_pos = int(m.group(1))
@@ -712,7 +703,7 @@ async def test_chain_insert_special_chars():
                 f"VALUES ('project', 'complex/technical_spec.md', {new_pos}, 0, "
                 f"'paragraph', '{special}', '{{}}')"
             ),
-        })
+        }, conn, state)
         text = result[0].text
         assert 'Error:' not in text, f"Unexpected error: {text}"
         data = json.loads(text)
@@ -725,7 +716,7 @@ async def test_chain_insert_special_chars():
                 "AND file='complex/technical_spec.md' "
                 "AND content LIKE '%üñîçödé%'"
             ),
-        })
+        }, conn, state)
         assert 'no results' not in verify[0].text
 
         # Verify in file on disk
@@ -743,14 +734,14 @@ async def test_chain_insert_special_chars():
 async def test_select_group_by_count():
     """S21: GROUP BY with COUNT — extra column emitted as JSON."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        _setup_server(Path(tmpdir))
+        conn, state = conn, state = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
                 "SELECT type, COUNT(*) FROM md WHERE depth=0 "
                 "GROUP BY type ORDER BY COUNT(*) DESC"
             ),
-        })
+        }, conn, state)
         text = result[0].text
         assert 'Error:' not in text, f"Unexpected error: {text}"
         # Each row should have standard block + JSON block with count
@@ -767,14 +758,14 @@ async def test_select_group_by_count():
 async def test_select_aggregates_mixed():
     """S22: AVG + COUNT + SUM — multiple extra columns in one row."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        _setup_server(Path(tmpdir))
+        conn, state = conn, state = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
                 "SELECT type, COUNT(*) AS cnt, AVG(line_end - line_start + 1) AS avg_lines "
                 "FROM md WHERE depth=0 GROUP BY type ORDER BY cnt DESC"
             ),
-        })
+        }, conn, state)
         text = result[0].text
         assert 'Error:' not in text, f"Unexpected error: {text}"
         assert '"cnt":' in text, f"Missing cnt in output:\n{text}"
@@ -793,14 +784,14 @@ async def test_select_aggregates_mixed():
 async def test_select_having_filter():
     """S23: GROUP BY + HAVING — filter groups after aggregation."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        _setup_server(Path(tmpdir))
+        conn, state = conn, state = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
                 "SELECT file, COUNT(*) AS cnt FROM md WHERE depth=0 "
                 "GROUP BY file HAVING cnt > 50 ORDER BY cnt DESC"
             ),
-        })
+        }, conn, state)
         text = result[0].text
         assert 'Error:' not in text, f"Unexpected error: {text}"
         assert '"cnt":' in text, f"Missing cnt in HAVING query:\n{text}"
@@ -816,14 +807,14 @@ async def test_select_having_filter():
 async def test_select_avg_content_length():
     """S24: Average content length per type with JSON alias."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        _setup_server(Path(tmpdir))
+        conn, state = conn, state = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
                 "SELECT type, ROUND(AVG(LENGTH(content)), 1) AS avg_len "
                 "FROM md GROUP BY type ORDER BY avg_len DESC"
             ),
-        })
+        }, conn, state)
         text = result[0].text
         assert 'Error:' not in text, f"Unexpected error: {text}"
         assert '"avg_len":' in text, f"Missing avg_len:\n{text}"
@@ -841,7 +832,7 @@ async def test_select_avg_content_length():
 async def test_select_subquery_in_where():
     """S25: Subquery in WHERE clause — filter by aggregate from subquery."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        _setup_server(Path(tmpdir))
+        conn, state = conn, state = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
@@ -850,7 +841,7 @@ async def test_select_subquery_in_where():
                 "  SELECT AVG(LENGTH(content)) FROM md WHERE depth=0"
                 ") ORDER BY LENGTH(content) DESC LIMIT 5"
             ),
-        })
+        }, conn, state)
         text = result[0].text
         assert 'Error:' not in text, f"Unexpected error: {text}"
         # Should return some rows with content longer than average
@@ -866,7 +857,7 @@ async def test_select_subquery_in_where():
 async def test_select_stats_by_file():
     """S26: Per-file statistics with multiple aggregates and ORDER BY."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        _setup_server(Path(tmpdir))
+        conn, state = conn, state = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
@@ -876,7 +867,7 @@ async def test_select_stats_by_file():
                 "FROM md WHERE depth=0 GROUP BY file "
                 "ORDER BY total DESC"
             ),
-        })
+        }, conn, state)
         text = result[0].text
         assert 'Error:' not in text, f"Unexpected error: {text}"
         # Verify all three extra columns present
@@ -901,7 +892,7 @@ async def test_select_stats_by_file():
 async def test_select_window_rank():
     """S27: Window function — RANK() over files by element count."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        _setup_server(Path(tmpdir))
+        conn, state = conn, state = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
@@ -909,7 +900,7 @@ async def test_select_window_rank():
                 "RANK() OVER (ORDER BY COUNT(*) DESC) AS rnk "
                 "FROM md WHERE depth=0 GROUP BY file"
             ),
-        })
+        }, conn, state)
         text = result[0].text
         assert 'Error:' not in text, f"Unexpected error: {text}"
         assert '"cnt":' in text, f"Missing cnt:\n{text}"
@@ -925,7 +916,7 @@ async def test_select_window_rank():
 async def test_select_self_join_aggregate():
     """S28: Self-join — parent elements with nested child counts."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        _setup_server(Path(tmpdir))
+        conn, state = conn, state = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
@@ -937,7 +928,7 @@ async def test_select_self_join_aggregate():
                 "GROUP BY p.id HAVING children > 0 "
                 "ORDER BY children DESC LIMIT 10"
             ),
-        })
+        }, conn, state)
         text = result[0].text
         assert 'Error:' not in text, f"Unexpected error: {text}"
         assert '"children":' in text, f"Missing children:\n{text}"
@@ -954,13 +945,13 @@ async def test_select_self_join_aggregate():
 async def test_select_distinct_types_json():
     """S29: DISTINCT with COUNT — verify no standard columns missing."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        _setup_server(Path(tmpdir))
+        conn, state = conn, state = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
                 "SELECT DISTINCT type FROM md ORDER BY type"
             ),
-        })
+        }, conn, state)
         text = result[0].text
         assert 'Error:' not in text, f"Unexpected error: {text}"
         # Pure standard columns — no extra JSON
@@ -979,7 +970,7 @@ async def test_select_distinct_types_json():
 async def test_select_union_all():
     """S30: UNION ALL — combine results from two queries."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        _setup_server(Path(tmpdir))
+        conn, state = conn, state = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
@@ -992,7 +983,7 @@ async def test_select_union_all():
                 "AND pos_in_file = (SELECT MAX(pos_in_file) FROM md "
                 "  WHERE depth=0 AND file='complex/technical_spec.md')"
             ),
-        })
+        }, conn, state)
         text = result[0].text
         assert 'Error:' not in text, f"Unexpected error: {text}"
         # source column is extra
@@ -1008,7 +999,7 @@ async def test_chain_update_then_aggregate_select():
     """S31: UPDATE several rows → SELECT with GROUP BY + extra columns."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tdir = Path(tmpdir)
-        _setup_server(tdir)
+        conn, state = _setup_server(tdir)
 
         # Count headings per file before UPDATE
         before = await srv._handle_call_tool('md_select', {
@@ -1016,7 +1007,7 @@ async def test_chain_update_then_aggregate_select():
                 "SELECT file, COUNT(*) AS cnt FROM md WHERE type='heading' "
                 "GROUP BY file ORDER BY file"
             ),
-        })
+        }, conn, state)
         text_before = before[0].text
         assert 'Error:' not in text_before
         assert '"cnt":' in text_before, "Expected extra JSON with cnt"
@@ -1027,7 +1018,7 @@ async def test_chain_update_then_aggregate_select():
                 "UPDATE md SET content = REPLACE(content, 'API', 'API v2') "
                 "WHERE type='heading' AND content LIKE '%API%'"
             ),
-        })
+        }, conn, state)
         assert 'Error:' not in update[0].text
 
         # Re-count headings per file — same GROUP BY, verify counts didn't change
@@ -1036,7 +1027,7 @@ async def test_chain_update_then_aggregate_select():
                 "SELECT file, COUNT(*) AS cnt FROM md WHERE type='heading' "
                 "GROUP BY file ORDER BY file"
             ),
-        })
+        }, conn, state)
         text_after = after[0].text
         assert 'Error:' not in text_after
         assert '"cnt":' in text_after, "Missing cnt after UPDATE"
@@ -1059,7 +1050,7 @@ async def test_chain_update_then_aggregate_select():
                 "SELECT type, content FROM md WHERE type='heading' "
                 "AND content LIKE '%API v2%' LIMIT 5"
             ),
-        })
+        }, conn, state)
         verify_text = verify[0].text
         assert 'Error:' not in verify_text
         assert 'API v2' in verify_text, "Updated content not found via SELECT"
@@ -1070,7 +1061,7 @@ async def test_chain_update_then_aggregate_select():
                 "SELECT file, COUNT(*) AS total FROM md WHERE type='paragraph' "
                 "GROUP BY file HAVING total > 5 ORDER BY total DESC"
             ),
-        })
+        }, conn, state)
         alias_text = alias_check[0].text
         assert 'Error:' not in alias_text
         assert '"total":' in alias_text, "Missing total in aggregate after UPDATE"
@@ -1082,7 +1073,7 @@ async def test_chain_delete_then_aggregate_select():
     """S32: DELETE some rows → SELECT with GROUP BY verifies counts changed."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tdir = Path(tmpdir)
-        _setup_server(tdir)
+        conn, state = _setup_server(tdir)
 
         # Count all top-level elements per file
         before = await srv._handle_call_tool('md_select', {
@@ -1090,7 +1081,7 @@ async def test_chain_delete_then_aggregate_select():
                 "SELECT file, COUNT(*) AS cnt FROM md WHERE depth=0 "
                 "GROUP BY file ORDER BY file"
             ),
-        })
+        }, conn, state)
         text_before = before[0].text
         assert 'Error:' not in text_before
 
@@ -1111,7 +1102,7 @@ async def test_chain_delete_then_aggregate_select():
                 "DELETE FROM md WHERE type='table' AND depth=0 "
                 "AND root='project'"
             ),
-        })
+        }, conn, state)
         assert 'Error:' not in delete[0].text
         data = json.loads(delete[0].text)
         deleted_tables = len(data['changes'])
@@ -1122,7 +1113,7 @@ async def test_chain_delete_then_aggregate_select():
                 "SELECT file, COUNT(*) AS cnt FROM md WHERE depth=0 "
                 "GROUP BY file ORDER BY file"
             ),
-        })
+        }, conn, state)
         text_after = after[0].text
         assert 'Error:' not in text_after
 
@@ -1147,7 +1138,7 @@ async def test_chain_delete_then_aggregate_select():
                 "SELECT type, COUNT(*) AS cnt FROM md WHERE type='table' "
                 "AND depth=0 GROUP BY type"
             ),
-        })
+        }, conn, state)
         verify_text = verify[0].text
         assert 'no results' in verify_text, "Tables should be gone"
     print(f"✅ S32 PASSED: DELETE → aggregate SELECT: {deleted_tables} tables deleted")
@@ -1158,7 +1149,7 @@ async def test_chain_insert_then_aggregate_select():
     """S33: INSERT multiple elements → SELECT with GROUP BY reflects new rows."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tdir = Path(tmpdir)
-        _setup_server(tdir)
+        conn, state = _setup_server(tdir)
 
         # Count paragraphs before
         before = await srv._handle_call_tool('md_select', {
@@ -1168,7 +1159,7 @@ async def test_chain_insert_then_aggregate_select():
                 "AND root='project' AND file='complex/tutorial_quickstart.md' "
                 "GROUP BY file"
             ),
-        })
+        }, conn, state)
         text_before = before[0].text
         before_cnt = 0
         import re
@@ -1182,7 +1173,7 @@ async def test_chain_insert_then_aggregate_select():
                 "SELECT MAX(pos_in_file) AS max_pos FROM md "
                 "WHERE root='project' AND file='complex/tutorial_quickstart.md'"
             ),
-        })
+        }, conn, state)
         m = re.search(r'"max_pos": (\d+)', pos_result[0].text)
         assert m, f"Cannot find max_pos in: {pos_result[0].text}"
         max_pos = int(m.group(1))
@@ -1196,7 +1187,7 @@ async def test_chain_insert_then_aggregate_select():
                     f"VALUES ('project', 'complex/tutorial_quickstart.md', {new_pos}, 0, "
                     f"'paragraph', 'Chain insert test #{i+1}', '{{}}')"
                 ),
-            })
+            }, conn, state)
             assert 'Error:' not in insert[0].text
 
         # Re-count paragraphs — should have increased by 3
@@ -1207,7 +1198,7 @@ async def test_chain_insert_then_aggregate_select():
                 "AND root='project' AND file='complex/tutorial_quickstart.md' "
                 "GROUP BY file"
             ),
-        })
+        }, conn, state)
         text_after = after[0].text
         after_cnt = 0
         m = re.search(r'"cnt": (\d+)', text_after)

@@ -1,13 +1,16 @@
 """MCP server entry point.
 
-Registers `md_select` and `md_change` tools against an in-memory SQLite database.
+Registers `md_select` and `md_change` tools against per-root in-memory SQLite databases.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
+from dataclasses import dataclass, field
+from pathlib import Path
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -16,7 +19,7 @@ import mcp.types as types
 from .config import RootConfig, get_doc_roots, set_roots
 from .database import get_connection, load_files
 from .descriptions import MD_SELECT_DESCRIPTION, MD_CHANGE_DESCRIPTION
-from .tools import md_select, md_change, ToolError
+from .tools import md_select, md_change, ToolError, set_root_config
 from .watcher import FileWatcher
 
 
@@ -69,38 +72,90 @@ def _format_select_result(rows: list[dict]) -> str:
 logger = logging.getLogger(__name__)
 
 
-# Module-level state — shared across the server lifecycle
-_conn: sqlite3.Connection | None = None
-_watcher: FileWatcher | None = None
-_roots_loaded: bool = False
+@dataclass
+class _ServerState:
+    """Per-instance state — isolated between server instances in the same process."""
+    databases: dict[str, sqlite3.Connection] = field(default_factory=dict)
+    watchers: dict[str, FileWatcher] = field(default_factory=dict)
+    session: types.Session | None = None
+
+    def get_or_create_db(self, root_cfg: RootConfig) -> sqlite3.Connection:
+        """Get existing database for a root or create a new one with loaded files."""
+        alias = root_cfg.alias
+        if alias in self.databases:
+            return self.databases[alias]
+
+        conn = get_connection()
+        count = load_files(conn, [root_cfg])
+        self.databases[alias] = conn
+        set_root_config(alias, root_cfg)
+        logger.info("Created DB for root '%s' (%s) — loaded %d rows", alias, root_cfg.path, count)
+
+        w = FileWatcher(conn)
+        w.start([root_cfg])
+        self.watchers[alias] = w
+
+        return conn
+
+    def resolve_connection(self, sql: str,
+                           ide_roots: list[RootConfig] | None) -> sqlite3.Connection | None:
+        """Resolve which database connection to use for a tool call.
+
+        Priority:
+        1. IDE roots (first root's alias)
+        2. root alias extracted from SQL WHERE clause → match in existing DBs
+        3. Static fallback roots (DOC_ROOTS or cwd)
+        """
+        # Priority 1: IDE roots
+        if ide_roots:
+            return self.get_or_create_db(ide_roots[0])
+
+        # Priority 2: extract root from SQL and search existing DBs
+        alias = _extract_root_from_sql(sql)
+        if alias:
+            if alias in self.databases:
+                return self.databases[alias]
+            # Containment match
+            for a, conn in self.databases.items():
+                if alias in a or a in alias:
+                    logger.info("Matched root '%s' to existing DB '%s'", alias, a)
+                    return self.databases[a]
+
+        # Priority 3: static fallback
+        static = get_doc_roots()
+        if static:
+            return self.get_or_create_db(static[0])
+
+        logger.error("No document roots available")
+        return None
+
+    def stop_watchers(self) -> None:
+        """Stop all file watchers."""
+        for w in self.watchers.values():
+            w.stop()
+        self.watchers.clear()
+        self.databases.clear()
 
 
-def _get_conn() -> sqlite3.Connection:
-    assert _conn is not None, "Database not initialized"
-    return _conn
-
-
-def _get_watcher() -> FileWatcher:
-    assert _watcher is not None, "Watcher not initialized"
-    return _watcher
+def _extract_root_from_sql(sql: str) -> str | None:
+    """Extract root alias from WHERE root = '...' clause."""
+    m = re.search(r"""WHERE\s+root\s*=\s*['"]([^'"]+)['"]""", sql, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    return None
 
 
 async def _try_load_roots(session) -> list[RootConfig] | None:
     """Request roots from IDE via MCP protocol, return None if not available."""
-    global _roots_loaded
-    if _roots_loaded:
-        return None
-    _roots_loaded = True
-
     try:
+        import asyncio
         from urllib.parse import urlparse
         from urllib.request import url2pathname
 
-        import asyncio
         logger.info("Requesting roots from IDE...")
         result = await asyncio.wait_for(session.list_roots(), timeout=2.0)
         if not result.roots:
-            logger.info("IDE returned no roots")
+            logger.error("IDE returned no roots")
             return None
         roots = []
         for r in result.roots:
@@ -121,27 +176,12 @@ async def _try_load_roots(session) -> list[RootConfig] | None:
         return None
 
 
-def _build_server() -> Server:
-    """Create the MCP server with tool registrations."""
+def _build_server(state: _ServerState) -> Server:
+    """Create the MCP server with tool registrations. State is captured in closures."""
     server = Server("md-sql")
 
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:
-        logger.info("list_tools called — checking IDE roots")
-        # First call: try to load roots from IDE
-        try:
-            ctx = server.request_context
-            ide_roots = await _try_load_roots(ctx.session)
-            if ide_roots is not None:
-                conn = _get_conn()
-                set_roots(ide_roots)
-                count = load_files(conn, ide_roots)
-                _get_watcher().stop()
-                _get_watcher().start(ide_roots)
-                logger.info("Loaded %d elements from %d IDE root(s)", count, len(ide_roots))
-        except (LookupError, Exception):
-            pass
-
         return [
             types.Tool(
                 name="md_select",
@@ -175,31 +215,53 @@ def _build_server() -> Server:
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
-        return await _handle_call_tool(name, arguments)
+        sql = arguments.get("sql", "")
+
+        # Always request roots from IDE on every tool call
+        ide_roots = None
+        try:
+            state.session = server.request_context.session
+            ide_roots = await _try_load_roots(state.session)
+        except (LookupError, Exception) as e:
+            logger.warning("call_tool: could not request IDE roots: %s", e)
+
+        # Resolve which connection to use
+        conn = state.resolve_connection(sql, ide_roots)
+        if conn is None:
+            return [types.TextContent(type="text", text="Error: no document roots available")]
+
+        return await _handle_call_tool(name, arguments, conn, state)
 
     return server
 
 
-async def _handle_call_tool(name: str, arguments: dict) -> list[types.TextContent]:
-    """Tool dispatch logic — extracted for testability."""
+async def _handle_call_tool(name: str, arguments: dict,
+                            conn: sqlite3.Connection,
+                            state: _ServerState | None = None) -> list[types.TextContent]:
+    """Tool dispatch logic."""
     sql = arguments.get("sql", "")
     if not sql:
         return [types.TextContent(type="text", text="Error: 'sql' parameter is required")]
 
     try:
         if name == "md_select":
-            rows = md_select(_get_conn(), sql)
+            logger.info("md_select: %.200s", sql)
+            rows = md_select(conn, sql)
             result = _format_select_result(rows)
             if not rows:
                 result = "(no results)"
             return [types.TextContent(type="text", text=result)]
 
         elif name == "md_change":
-            result = md_change(_get_conn(), sql)
+            logger.info("md_change: %.200s", sql)
+            result = md_change(conn, sql)
             # Notify watcher to ignore the files we just wrote
-            for key in result.get("files_changed", []):
-                r, f = key.split(":", 1)
-                _get_watcher().ignore_path(r, f)
+            if state:
+                for key in result.get("files_changed", []):
+                    r, f = key.split(":", 1)
+                    watcher = state.watchers.get(r)
+                    if watcher:
+                        watcher.ignore_path(r, f)
             result_json = json.dumps(result, ensure_ascii=False, indent=2)
             return [types.TextContent(type="text", text=result_json)]
 
@@ -216,29 +278,23 @@ async def _handle_call_tool(name: str, arguments: dict) -> list[types.TextConten
 async def run_server() -> None:
     """Initialize resources and start the MCP server.
 
-    Doc roots are resolved in order:
-    1. MCP roots from IDE (via list_tools first-call lazy init)
-    2. DOC_ROOTS environment variable
-    3. Current working directory as fallback
+    Pre-loads static roots (DOC_ROOTS or cwd) so the server is usable
+    even without IDE support. IDE roots are requested on every tool call.
     """
-    global _conn, _watcher
-
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
 
-    _conn = get_connection()
+    state = _ServerState()
 
-    # Pre-load from env/config so server is usable immediately
-    roots = get_doc_roots()
-    count = load_files(_conn, roots)
-    logger.info("Pre-loaded %d elements from %d root(s)", count, len(roots))
+    # Pre-load static roots so server is usable immediately
+    static = get_doc_roots()
+    for root_cfg in static:
+        state.get_or_create_db(root_cfg)
+    logger.info("Pre-loaded %d static root(s)", len(static))
 
-    _watcher = FileWatcher(_conn)
-    _watcher.start(roots)
-
-    server = _build_server()
+    server = _build_server(state)
 
     try:
         async with stdio_server() as (read_stream, write_stream):
@@ -248,7 +304,7 @@ async def run_server() -> None:
                 server.create_initialization_options(),
             )
     finally:
-        _watcher.stop()
+        state.stop_watchers()
 
 
 def main() -> None:

@@ -59,6 +59,13 @@ DOC_ROOTS="docs=./docs;specs=./specifications"
 
 ## MCP-инструменты
 
+Корни документации определяются на каждый вызов инструмента:
+1. **IDE roots** — запрос `session.list_roots()` при каждом `md_select`/`md_change`
+2. Если IDE не вернула корни — из SQL (`WHERE root = 'alias'`) ищется существующая БД
+3. Fallback — `DOC_ROOTS` из env или текущая директория
+
+Каждый уникальный root alias получает **отдельную in-memory SQLite БД**.
+
 ### `md_select`
 
 Выполняет произвольный SELECT-запрос к таблице `md`.
@@ -107,13 +114,14 @@ src/mcp_md_sql/
 └── server.py         # Точка входа, MCP-сервер
 
 tests/
+├── conftest.py              # Глобальные фикстуры (cleanup кэша корней)
 ├── test_parser.py          # 30 тестов парсера (+ frontmatter, nested lists)
 ├── test_reconstructor.py   # 23 теста реконструктора (+ frontmatter)
 ├── test_integration.py     # 15 интеграционных тестов (+ integrity check)
 ├── test_select_queries.py  # 47 тестов (SELECT + валидация + config + timeout + FS errors)
 ├── test_watcher.py         # 4 теста файлового вотчера
-├── test_server.py          # 11 тестов серверного слоя (_handle_call_tool dispatch)
-├── test_scenarios.py       # 20 сценариев реальной работы (SELECT/INSERT/UPDATE/DELETE chains)
+├── test_server.py          # 26 тестов (_format_select_result + _handle_call_tool + _ServerState)
+├── test_scenarios.py       # 33 сценария реальной работы (через _handle_call_tool)
 └── fixtures/
     ├── test_basic.md       # Базовый фикстур
     └── complex/            # 5 сложных .md документов для 20 сценариев

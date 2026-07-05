@@ -14,11 +14,38 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .config import get_doc_roots
+from .config import RootConfig, get_doc_roots
 from .database import reload_file
 from .reconstructor import render_single
 
 logger = logging.getLogger(__name__)
+
+
+# Per-root config registry (set by server.py when creating per-root DBs)
+_root_configs: dict[str, RootConfig] = {}
+
+
+def set_root_config(alias: str, cfg: RootConfig) -> None:
+    """Register a root config for alias lookup."""
+    _root_configs[alias] = cfg
+
+
+def clear_root_configs() -> None:
+    """Clear all registered root configs (used in tests)."""
+    _root_configs.clear()
+
+
+def get_root_path(alias: str) -> Path:
+    """Find the filesystem path for a root alias."""
+    # First: check get_doc_roots (authoritative, set by tests and server)
+    for cfg in get_doc_roots():
+        if cfg.alias == alias:
+            _root_configs[alias] = cfg  # update cache
+            return cfg.path
+    # Fallback: check per-root registry cache
+    if alias in _root_configs:
+        return _root_configs[alias].path
+    raise ToolError(f"Unknown root alias: {alias}")
 
 TIMEOUT_SEC = 15
 FORBIDDEN_DDL = re.compile(
@@ -376,7 +403,7 @@ def _patch_file_insert(conn: sqlite3.Connection, root: str, file: str,
 
     After writing, verifies that file size and surrounding lines are intact.
     """
-    root_path = _find_root_path(root)
+    root_path = get_root_path(root)
     full_path = root_path / file
     if not full_path.exists():
         raise ToolError(f"File does not exist: {full_path}")
@@ -599,7 +626,7 @@ def _patch_file_update(conn: sqlite3.Connection, root: str, file: str,
 
     Returns list of (row_id, line_start, line_end, new_text) for DB sync.
     """
-    root_path = _find_root_path(root)
+    root_path = get_root_path(root)
     full_path = root_path / file
     if not full_path.exists():
         raise ToolError(f"File does not exist: {full_path}")
@@ -825,7 +852,7 @@ def _handle_delete(conn: sqlite3.Connection, sql: str) -> dict[str, Any]:
 
 def _patch_file_delete(root: str, file: str, deleted_rows: list[dict]) -> None:
     """Remove lines for deleted block elements from the file."""
-    root_path = _find_root_path(root)
+    root_path = get_root_path(root)
     full_path = root_path / file
     if not full_path.exists():
         raise ToolError(f"File does not exist: {full_path}")
@@ -853,7 +880,7 @@ def _patch_file_inline_deletes(conn: sqlite3.Connection, root: str, file: str,
     For each inline element being deleted, find its parent's source lines,
     remove the inline markup, and write the updated parent source back.
     """
-    root_path = _find_root_path(root)
+    root_path = get_root_path(root)
     full_path = root_path / file
     if not full_path.exists():
         raise ToolError(f"File does not exist: {full_path}")
@@ -932,17 +959,9 @@ def _collect_inline_patch(source_lines: list[str], deleted_row: dict,
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def _find_root_path(root: str) -> Path:
-    """Find the filesystem path for a root alias."""
-    for cfg in get_doc_roots():
-        if cfg.alias == root:
-            return cfg.path
-    raise ToolError(f"Unknown root alias: {root}")
-
-
 def _reload_after_write(conn: sqlite3.Connection, root: str, file: str) -> None:
     """Reload a file into the database after writing to it."""
-    root_path = _find_root_path(root)
+    root_path = get_root_path(root)
     reload_file(conn, root, file, root_path)
 
 
@@ -991,7 +1010,7 @@ def _reload_preserve_ids(conn: sqlite3.Connection, root: str, file: str) -> None
         key = (r['type'], r['content'])
         old_by_key[key].append(r['id'])
 
-    root_path = _find_root_path(root)
+    root_path = get_root_path(root)
     reload_file(conn, root, file, root_path)
 
     new_rows = conn.execute(

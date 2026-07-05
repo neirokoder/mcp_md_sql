@@ -13,11 +13,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 from mcp_md_sql import server as srv
 from mcp_md_sql.config import RootConfig, set_roots
 from mcp_md_sql.database import get_connection, load_files
-from mcp_md_sql.tools import ToolError
+from mcp_md_sql.tools import ToolError, set_root_config
+
 
 # ── helpers ──────────────────────────────────────────────────────────────────
-
-
 def _create_test_env(tmpdir: str) -> Path:
     root = Path(tmpdir)
     docs = root / "docs"
@@ -29,26 +28,19 @@ def _create_test_env(tmpdir: str) -> Path:
     return root
 
 
-def _init_server(root: Path) -> None:
-    """Initialise server globals as `run_server()` would."""
-    srv._conn = get_connection()
+def _make_conn(root: Path) -> sqlite3.Connection:
+    """Create a connection with loaded files for testing."""
+    import sqlite3
     cfg = RootConfig(alias="project", path=root)
     set_roots([cfg])
-    load_files(srv._conn, [cfg])
-    srv._roots_loaded = True  # prevent IDE root loading in tests
+    set_root_config("project", cfg)
+    conn = get_connection()
+    load_files(conn, [cfg])
+    return conn
 
 
-def _cleanup_server() -> None:
-    srv._conn = None
-    srv._watcher = None
-    srv._roots_loaded = False
-
-
-@pytest.fixture(autouse=True)
-def _reset_server():
-    _cleanup_server()
-    yield
-    _cleanup_server()
+# Dummy state for _handle_call_tool (no watchers needed in unit tests)
+_TEST_STATE = srv._ServerState()
 
 
 # ── unit: _format_select_result ──────────────────────────────────────────────
@@ -189,12 +181,12 @@ class TestFormatSelectResult:
 async def test_md_select_text_format():
     """_handle_call_tool returns text format for md_select."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        _init_server(_create_test_env(tmpdir))
+        conn = _make_conn(_create_test_env(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': "SELECT * FROM md WHERE type='heading' "
                    "ORDER BY pos_in_file",
-        })
+        }, conn)
 
     assert len(result) == 1
     text = result[0].text
@@ -214,11 +206,11 @@ async def test_md_select_text_format():
 async def test_md_select_empty_result():
     """_handle_call_tool returns '(no results)' for empty queries."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        _init_server(_create_test_env(tmpdir))
+        conn = _make_conn(_create_test_env(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': "SELECT * FROM md WHERE type='table'",
-        })
+        }, conn)
 
     assert result[0].text == '(no results)'
 
@@ -227,11 +219,11 @@ async def test_md_select_empty_result():
 async def test_md_select_error():
     """_handle_call_tool returns error message for invalid SQL."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        _init_server(_create_test_env(tmpdir))
+        conn = _make_conn(_create_test_env(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': 'DROP TABLE md',
-        })
+        }, conn)
 
     assert 'Error:' in result[0].text
 
@@ -239,9 +231,9 @@ async def test_md_select_error():
 @pytest.mark.asyncio
 async def test_md_select_missing_sql():
     """_handle_call_tool returns error when sql param is missing."""
-    _init_server(Path(tempfile.mkdtemp()))
+    conn = _make_conn(Path(tempfile.mkdtemp()))
 
-    result = await srv._handle_call_tool('md_select', {})
+    result = await srv._handle_call_tool('md_select', {}, conn)
 
     assert 'Error:' in result[0].text
     assert 'sql' in result[0].text.lower()
@@ -250,8 +242,108 @@ async def test_md_select_missing_sql():
 @pytest.mark.asyncio
 async def test_unknown_tool():
     """_handle_call_tool returns error for unknown tool name."""
-    _init_server(Path(tempfile.mkdtemp()))
+    conn = _make_conn(Path(tempfile.mkdtemp()))
 
-    result = await srv._handle_call_tool('unknown_tool', {'sql': 'SELECT 1'})
+    result = await srv._handle_call_tool('unknown_tool', {'sql': 'SELECT 1'}, conn)
 
     assert 'Unknown tool' in result[0].text
+
+
+# ── tests for new resolution logic ─────────────────────────────────────────────
+
+
+class TestServerState:
+    """Tests for _ServerState and connection resolution."""
+
+    def test_get_or_create_db_creates_and_caches(self):
+        """get_or_create_db creates a new DB on first call and reuses it."""
+        state = srv._ServerState()
+        cfg = RootConfig(alias="test", path=Path(tempfile.mkdtemp()))
+        # Need at least one .md file for load_files to succeed
+        (cfg.path / "test.md").write_text("# Test", encoding='utf-8')
+
+        conn1 = state.get_or_create_db(cfg)
+        assert conn1 is not None
+        assert cfg.alias in state.databases
+
+        conn2 = state.get_or_create_db(cfg)
+        assert conn2 is conn1  # same cached connection
+
+    def test_resolve_ide_roots_priority(self):
+        """resolve_connection uses IDE roots first."""
+        state = srv._ServerState()
+        cfg = RootConfig(alias="ide_root", path=Path(tempfile.mkdtemp()))
+        (cfg.path / "doc.md").write_text("# Doc", encoding='utf-8')
+
+        conn = state.resolve_connection("SELECT 1", ide_roots=[cfg])
+        assert conn is not None
+        assert "ide_root" in state.databases
+
+    def test_resolve_sql_root_match(self):
+        """resolve_connection uses SQL WHERE root when no IDE roots."""
+        state = srv._ServerState()
+        cfg = RootConfig(alias="mydocs", path=Path(tempfile.mkdtemp()))
+        (cfg.path / "read.md").write_text("# Read", encoding='utf-8')
+        state.get_or_create_db(cfg)
+
+        conn = state.resolve_connection(
+            "SELECT * FROM md WHERE root='mydocs'", ide_roots=None)
+        assert conn is not None
+        assert conn is state.databases["mydocs"]
+
+    def test_resolve_sql_root_containment_match(self):
+        """resolve_connection matches root by containment."""
+        state = srv._ServerState()
+        cfg = RootConfig(alias="project_docs", path=Path(tempfile.mkdtemp()))
+        (cfg.path / "f.md").write_text("# F", encoding='utf-8')
+        state.get_or_create_db(cfg)
+
+        # 'docs' is contained in 'project_docs'
+        conn = state.resolve_connection(
+            "SELECT * FROM md WHERE root='docs'", ide_roots=None)
+        assert conn is not None
+
+    def test_resolve_fallback_to_static(self):
+        """resolve_connection falls back to static roots."""
+        from mcp_md_sql.config import set_roots
+        state = srv._ServerState()
+        static_root = Path(tempfile.mkdtemp())
+        (static_root / "s.md").write_text("# Static", encoding='utf-8')
+        set_roots([RootConfig(alias="static", path=static_root)])
+
+        conn = state.resolve_connection("SELECT 1", ide_roots=None)
+        assert conn is not None
+        assert "static" in state.databases
+
+    def test_resolve_no_roots_returns_none(self):
+        """resolve_connection returns None when no roots available."""
+        from mcp_md_sql.config import set_roots
+        state = srv._ServerState()
+        set_roots([])  # clear static roots
+
+        conn = state.resolve_connection("SELECT 1", ide_roots=None)
+        assert conn is None
+
+
+class TestExtractRootFromSql:
+    """Tests for _extract_root_from_sql."""
+
+    def test_single_quotes(self):
+        assert srv._extract_root_from_sql(
+            "SELECT * FROM md WHERE root='project'") == "project"
+
+    def test_double_quotes(self):
+        assert srv._extract_root_from_sql(
+            'SELECT * FROM md WHERE root="project"') == "project"
+
+    def test_with_extra_conditions(self):
+        assert srv._extract_root_from_sql(
+            "SELECT * FROM md WHERE root='docs' AND type='heading'") == "docs"
+
+    def test_no_where(self):
+        assert srv._extract_root_from_sql(
+            "SELECT * FROM md LIMIT 10") is None
+
+    def test_root_not_in_where(self):
+        assert srv._extract_root_from_sql(
+            "SELECT * FROM md WHERE type='heading'") is None
