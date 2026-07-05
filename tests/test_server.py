@@ -303,17 +303,18 @@ class TestServerState:
             "SELECT * FROM md WHERE root='docs'", ide_roots=None)
         assert conn is not None
 
-    def test_resolve_fallback_to_static(self):
-        """resolve_connection falls back to static roots."""
-        from mcp_md_sql.config import set_roots
+    def test_resolve_preloaded_root_found_by_sql(self):
+        """resolve_connection finds a pre-loaded root via SQL WHERE."""
         state = srv._ServerState()
-        static_root = Path(tempfile.mkdtemp())
-        (static_root / "s.md").write_text("# Static", encoding='utf-8')
-        set_roots([RootConfig(alias="static", path=static_root)])
+        root_path = Path(tempfile.mkdtemp())
+        (root_path / "doc.md").write_text("# Doc", encoding='utf-8')
+        cfg = RootConfig(alias="docs", path=root_path)
+        state.get_or_create_db(cfg)
 
-        conn = state.resolve_connection("SELECT 1", ide_roots=None)
+        conn = state.resolve_connection(
+            "SELECT * FROM md WHERE root='docs'", ide_roots=None)
         assert conn is not None
-        assert "static" in state.databases
+        assert conn is state.databases["docs"]
 
     def test_resolve_no_roots_returns_none(self):
         """resolve_connection returns None when no roots available."""

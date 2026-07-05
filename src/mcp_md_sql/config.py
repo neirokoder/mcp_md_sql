@@ -95,8 +95,4 @@ def get_doc_roots() -> list[RootConfig]:
     global _roots
     if _roots is not None:
         return _roots
-    roots = parse_doc_roots()
-    if not roots:
-        cwd = Path.cwd()
-        roots = [RootConfig(alias="default", path=cwd)]
-    return roots
+    return parse_doc_roots()

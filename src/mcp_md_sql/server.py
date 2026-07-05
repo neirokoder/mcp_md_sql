@@ -18,7 +18,7 @@ import mcp.types as types
 
 from .config import RootConfig, get_doc_roots, set_roots
 from .database import get_connection, load_files
-from .descriptions import MD_SELECT_DESCRIPTION, MD_CHANGE_DESCRIPTION
+from .descriptions import MD_SELECT_DESCRIPTION, MD_CHANGE_DESCRIPTION, SQL_SELECT_DESC, SQL_CHANGE_DESC, ROOT_PATH_DESC
 from .tools import md_select, md_change, ToolError, set_root_config
 from .watcher import FileWatcher
 
@@ -104,7 +104,7 @@ class _ServerState:
         Priority:
         1. IDE roots (first root's alias)
         2. root alias extracted from SQL WHERE clause → match in existing DBs
-        3. Static fallback roots (DOC_ROOTS or cwd)
+        3. Single pre-loaded root (DOC_ROOTS) — only when exactly one
         """
         # Priority 1: IDE roots
         if ide_roots:
@@ -121,10 +121,9 @@ class _ServerState:
                     logger.info("Matched root '%s' to existing DB '%s'", alias, a)
                     return self.databases[a]
 
-        # Priority 3: static fallback
-        static = get_doc_roots()
-        if static:
-            return self.get_or_create_db(static[0])
+        # Priority 3: single pre-loaded root (from DOC_ROOTS, not a fallback)
+        if len(self.databases) == 1:
+            return next(iter(self.databases.values()))
 
         logger.error("No document roots available")
         return None
@@ -191,8 +190,12 @@ def _build_server(state: _ServerState) -> Server:
                     "properties": {
                         "sql": {
                             "type": "string",
-                            "description": "SELECT query (single statement only)",
-                        }
+                            "description": SQL_SELECT_DESC,
+                        },
+                        "root_path": {
+                            "type": "string",
+                            "description": ROOT_PATH_DESC,
+                        },
                     },
                     "required": ["sql"],
                 },
@@ -205,8 +208,12 @@ def _build_server(state: _ServerState) -> Server:
                     "properties": {
                         "sql": {
                             "type": "string",
-                            "description": "INSERT / UPDATE / DELETE statement",
-                        }
+                            "description": SQL_CHANGE_DESC,
+                        },
+                        "root_path": {
+                            "type": "string",
+                            "description": ROOT_PATH_DESC,
+                        },
                     },
                     "required": ["sql"],
                 },
@@ -216,6 +223,25 @@ def _build_server(state: _ServerState) -> Server:
     @server.call_tool()
     async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         sql = arguments.get("sql", "")
+        root_path = arguments.get("root_path")
+
+        # Priority 0: explicit root_path (like codegraph_explore's projectPath)
+        if root_path:
+            path = Path(root_path).resolve()
+            if not path.exists():
+                return [types.TextContent(
+                    type="text",
+                    text=f"Error: root_path does not exist: {root_path}",
+                )]
+            if not path.is_dir():
+                return [types.TextContent(
+                    type="text",
+                    text=f"Error: root_path must be a directory: {root_path}",
+                )]
+            alias = path.name or "root"
+            cfg = RootConfig(alias=alias, path=path)
+            conn = state.get_or_create_db(cfg)
+            return await _handle_call_tool(name, arguments, conn, state)
 
         # Always request roots from IDE on every tool call
         ide_roots = None
@@ -225,7 +251,7 @@ def _build_server(state: _ServerState) -> Server:
         except (LookupError, Exception) as e:
             logger.warning("call_tool: could not request IDE roots: %s", e)
 
-        # Resolve which connection to use
+        # Resolve which connection to use (priorities 1-3)
         conn = state.resolve_connection(sql, ide_roots)
         if conn is None:
             return [types.TextContent(type="text", text="Error: no document roots available")]
@@ -278,8 +304,9 @@ async def _handle_call_tool(name: str, arguments: dict,
 async def run_server() -> None:
     """Initialize resources and start the MCP server.
 
-    Pre-loads static roots (DOC_ROOTS or cwd) so the server is usable
+    Pre-loads static roots (DOC_ROOTS) — if set — so the server is usable
     even without IDE support. IDE roots are requested on every tool call.
+    root_path parameter takes highest priority.
     """
     logging.basicConfig(
         level=logging.INFO,

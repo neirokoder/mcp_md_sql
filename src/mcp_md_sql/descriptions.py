@@ -1,6 +1,14 @@
 """Tool descriptions exposed to the LLM via MCP."""
+MD_SELECT_DESCRIPTION = "Reads the structure of an md files via SQL SELECT queries (headings, links, code blocks, etc.) with filtering"
+MD_CHANGE_DESCRIPTION = "Edits md files via SQL INSERT/UPDATE/DELETE queries with filtering"
 
-MD_SELECT_DESCRIPTION = """\
+# ── Param descriptions (shared between tool schemas) ──
+
+ROOT_PATH_DESC = (
+    "Absolute path to the project root directory. "
+)
+
+SQL_SELECT_DESC = """\
 Execute SELECT queries (standard SQLite SQL) against parsed Markdown.
 
 Table `md` (parsed AST of .md files):
@@ -26,7 +34,7 @@ Inline elements (strong, emphasis, ...) have parent_pos != NULL and depth > 0.
 Use json_extract(attrs_json, '$.key') to query attributes.
 """
 
-MD_CHANGE_DESCRIPTION = """\
+SQL_CHANGE_DESC = """\
 Modify Markdown files via SQL. INSERT, UPDATE, DELETE to table `md` are applied as patches
 to the original .md files. Returns a diff.
 

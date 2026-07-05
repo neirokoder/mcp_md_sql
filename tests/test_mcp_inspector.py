@@ -96,11 +96,8 @@ def multi_project(tmp_path: Path) -> StdioServerParameters:
 
 @pytest.fixture
 def no_roots_server(tmp_path: Path) -> StdioServerParameters:
-    """Server started without DOC_ROOTS — will use cwd (tmp_path) as default.
-
-    Creates a .md file in tmp_path so the server loads it.
-    """
-    # Create a .md file in cwd so the default root has data
+    """Server started without DOC_ROOTS — no roots will be available."""
+    # Create a .md file in tmp_path (it won't be loaded without a root)
     (tmp_path / "welcome.md").write_text("# Welcome\n\nDefault root document.\n", encoding='utf-8')
     env = dict(os.environ)
     env.pop("DOC_ROOTS", None)
@@ -487,22 +484,20 @@ async def test_error_no_where_in_delete(single_project: StdioServerParameters):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Test: no DOC_ROOTS — fallback to cwd
+# Test: no DOC_ROOTS — error returned to client
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
 @pytest.mark.asyncio
-async def test_fallback_to_cwd(no_roots_server: StdioServerParameters):
-    """Server starts with cwd as default root when DOC_ROOTS is unset."""
+async def test_no_roots_returns_error(no_roots_server: StdioServerParameters):
+    """Server without DOC_ROOTS returns error when no IDE roots."""
     async with stdio_client(no_roots_server) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
 
-            # list_tools should still work
             tools = await session.list_tools()
             tool_names = {t.name for t in tools.tools}
 
-            # md_select on the default root (cwd = tmp_path with welcome.md)
             result = await session.call_tool("md_select", {
                 "sql": "SELECT content FROM md WHERE type='heading'",
             })
@@ -510,7 +505,7 @@ async def test_fallback_to_cwd(no_roots_server: StdioServerParameters):
     text = "".join(c.text for c in result.content)
     assert "md_select" in tool_names
     assert "md_change" in tool_names
-    assert "Welcome" in text, f"Default root content not found:\n{text}"
+    assert "no document roots" in text.lower(), f"Expected error, got:\n{text}"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
