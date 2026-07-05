@@ -32,23 +32,27 @@ from mcp_md_sql.watcher import FileWatcher
 FIXTURE_DIR = Path(__file__).parent / 'fixtures' / 'complex'
 
 
-def _setup_server(tmpdir: Path) -> tuple[sqlite3.Connection, srv._ServerState]:
-    """Copy fixtures to tmpdir, create connection + state for testing."""
+def _setup_server(tmpdir: Path) -> tuple[sqlite3.Connection, srv._ServerState, str]:
+    """Copy fixtures to tmpdir, create connection + state for testing.
+
+    Returns (conn, state, root_alias) where root_alias is the full path string.
+    """
     shutil.copytree(FIXTURE_DIR, tmpdir / 'complex', dirs_exist_ok=True)
 
     conn = get_connection()
-    cfg = RootConfig(alias="project", path=tmpdir)
+    root_alias = str(tmpdir)
+    cfg = RootConfig(path=tmpdir)
     set_roots([cfg])
-    set_root_config("project", cfg)
+    set_root_config(cfg)
     load_files(conn, [cfg])
 
     # Create server state with watcher (needed for md_change ignore_path)
     state = srv._ServerState()
-    state.databases["project"] = conn
+    state.databases[root_alias] = conn
     watcher = FileWatcher(conn)
-    state.watchers["project"] = watcher
+    state.watchers[root_alias] = watcher
 
-    return conn, state
+    return conn, state, root_alias
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -60,7 +64,7 @@ def _setup_server(tmpdir: Path) -> tuple[sqlite3.Connection, srv._ServerState]:
 async def test_select_toc():
     """S1: TOC — select all headings from api_docs with depth & level."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        conn, state = conn, state = _setup_server(Path(tmpdir))
+        conn, state, root_alias = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
@@ -84,7 +88,7 @@ async def test_select_toc():
 async def test_select_code_languages():
     """S2: Code blocks across all files — verify content from different languages."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        conn, state = conn, state = _setup_server(Path(tmpdir))
+        conn, state, root_alias = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
@@ -109,7 +113,7 @@ async def test_select_code_languages():
 async def test_select_table_inventory():
     """S3: Find all tables with file and content preview."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        conn, state = conn, state = _setup_server(Path(tmpdir))
+        conn, state, root_alias = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
@@ -130,7 +134,7 @@ async def test_select_table_inventory():
 async def test_select_link_audit():
     """S4: Link audit — all links (inline, so depth>0) with URLs."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        conn, state = conn, state = _setup_server(Path(tmpdir))
+        conn, state, root_alias = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
@@ -153,7 +157,7 @@ async def test_select_link_audit():
 async def test_select_keyword_search():
     """S5: Search paragraphs containing specific keywords across files."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        conn, state = conn, state = _setup_server(Path(tmpdir))
+        conn, state, root_alias = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
@@ -172,7 +176,7 @@ async def test_select_keyword_search():
 async def test_select_frontmatter():
     """S6: Frontmatter extraction — all 5 files have frontmatter with metadata."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        conn, state = conn, state = _setup_server(Path(tmpdir))
+        conn, state, root_alias = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
@@ -197,7 +201,7 @@ async def test_select_frontmatter():
 async def test_select_cross_file_stats():
     """S7: Cross-file element counts by type across all 5 documents."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        conn, state = conn, state = _setup_server(Path(tmpdir))
+        conn, state, root_alias = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
@@ -222,7 +226,7 @@ async def test_select_cross_file_stats():
 async def test_select_nested_list_depth():
     """S8: Nested list items at depth>0 in configuration_guide."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        conn, state = conn, state = _setup_server(Path(tmpdir))
+        conn, state, root_alias = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
@@ -245,7 +249,7 @@ async def test_select_nested_list_depth():
 async def test_select_heading_hierarchy():
     """S9: Heading hierarchy by level in technical_spec (no parent_pos for headings)."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        conn, state = conn, state = _setup_server(Path(tmpdir))
+        conn, state, root_alias = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
@@ -271,7 +275,7 @@ async def test_select_heading_hierarchy():
 async def test_select_complexity_ranking():
     """S10: List items across files with depth info for complexity analysis."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        conn, state = conn, state = _setup_server(Path(tmpdir))
+        conn, state, root_alias = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
@@ -299,7 +303,7 @@ async def test_change_mass_rename_heading():
     """S11: Mass rename — UPDATE 'Guide' → 'Manual' in all headings across files."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tdir = Path(tmpdir)
-        conn, state = _setup_server(tdir)
+        conn, state, root_alias = _setup_server(tdir)
 
         result = await srv._handle_call_tool('md_change', {
             'sql': (
@@ -327,7 +331,7 @@ async def test_change_bulk_paragraph_update():
     """S12: Bulk paragraph update — replace text in multiple paragraphs."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tdir = Path(tmpdir)
-        conn, state = _setup_server(tdir)
+        conn, state, root_alias = _setup_server(tdir)
 
         result = await srv._handle_call_tool('md_change', {
             'sql': (
@@ -350,7 +354,7 @@ async def test_change_delete_section():
     """S13: DELETE a heading — removes 'Deprecated Endpoints' from api_docs."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tdir = Path(tmpdir)
-        conn, state = _setup_server(tdir)
+        conn, state, root_alias = _setup_server(tdir)
 
         # Verify heading exists before
         before = await srv._handle_call_tool('md_select', {
@@ -383,13 +387,13 @@ async def test_change_insert_paragraph():
     """S14: INSERT a new paragraph at the end of an existing document."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tdir = Path(tmpdir)
-        conn, state = _setup_server(tdir)
+        conn, state, root_alias = _setup_server(tdir)
 
         # Get current max pos_in_file via a query the formatter can display
         pos_result = await srv._handle_call_tool('md_select', {
             'sql': (
-                "SELECT type, file, pos_in_file FROM md "
-                "WHERE root='project' AND file='complex/api_docs.md' "
+                f"SELECT type, file, pos_in_file FROM md "
+                f"WHERE root='{root_alias}' AND file='complex/api_docs.md' "
                 "ORDER BY pos_in_file DESC LIMIT 1"
             ),
         }, conn, state)
@@ -401,8 +405,8 @@ async def test_change_insert_paragraph():
         result = await srv._handle_call_tool('md_change', {
             'sql': (
                 f"INSERT INTO md (root, file, pos_in_file, depth, type, content, attrs_json) "
-                f"VALUES ('project', 'complex/api_docs.md', {new_pos}, 0, "
-                f"'paragraph', 'Newly inserted paragraph for testing.', '{{}}')"
+                f"VALUES ('{root_alias}', 'complex/api_docs.md', {new_pos}, 0, "
+                                f"'paragraph', 'Newly inserted paragraph for testing.', '{{}}')"
             ),
         }, conn, state)
         text = result[0].text
@@ -431,13 +435,13 @@ async def test_change_insert_table():
     """S15: INSERT a table element into configuration_guide."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tdir = Path(tmpdir)
-        conn, state = _setup_server(tdir)
+        conn, state, root_alias = _setup_server(tdir)
 
         # Get max position
         pos_result = await srv._handle_call_tool('md_select', {
             'sql': (
-                "SELECT type, file, pos_in_file FROM md "
-                "WHERE root='project' AND file='complex/configuration_guide.md' "
+                f"SELECT type, file, pos_in_file FROM md "
+                f"WHERE root='{root_alias}' AND file='complex/configuration_guide.md' "
                 "ORDER BY pos_in_file DESC LIMIT 1"
             ),
         }, conn, state)
@@ -449,9 +453,9 @@ async def test_change_insert_table():
         result = await srv._handle_call_tool('md_change', {
             'sql': (
                 f"INSERT INTO md (root, file, pos_in_file, depth, type, content, attrs_json) "
-                f"VALUES ('project', 'complex/configuration_guide.md', {new_pos}, 0, "
-                f"'table', '| Key | Value |\\\\n| --- | --- |\\\\n| timeout | 60s |\\\\n| retries | 3 |', "
-                f"'{{}}')"
+                f"VALUES ('{root_alias}', 'complex/configuration_guide.md', {new_pos}, 0, "
+                                f"'table', '| Key | Value |\\n| --- | --- |\\n| timeout | 60s |\\n| retries | 3 |', "
+                                f"'{{}}')"
             ),
         }, conn, state)
         text = result[0].text
@@ -468,7 +472,7 @@ async def test_change_delete_inline():
     """S16: DELETE an inline link element — removes link markup from parent."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tdir = Path(tmpdir)
-        conn, state = _setup_server(tdir)
+        conn, state, root_alias = _setup_server(tdir)
 
         # Delete the Python link from tutorial
         result = await srv._handle_call_tool('md_change', {
@@ -499,13 +503,13 @@ async def test_chain_full_lifecycle():
     """S17: Full lifecycle — SELECT → INSERT → SELECT → UPDATE → SELECT → DELETE → SELECT."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tdir = Path(tmpdir)
-        conn, state = _setup_server(tdir)
+        conn, state, root_alias = _setup_server(tdir)
 
         # 1. Get max pos for end-of-file insertion
         pos_result = await srv._handle_call_tool('md_select', {
             'sql': (
-                "SELECT type, file, pos_in_file FROM md "
-                "WHERE root='project' AND file='complex/tutorial_quickstart.md' "
+                f"SELECT type, file, pos_in_file FROM md "
+                f"WHERE root='{root_alias}' AND file='complex/tutorial_quickstart.md' "
                 "ORDER BY pos_in_file DESC LIMIT 1"
             ),
         }, conn, state)
@@ -518,7 +522,7 @@ async def test_chain_full_lifecycle():
         step2 = await srv._handle_call_tool('md_change', {
             'sql': (
                 f"INSERT INTO md (root, file, pos_in_file, depth, type, content, attrs_json) "
-                f"VALUES ('project', 'complex/tutorial_quickstart.md', {new_pos}, 0, "
+                f"VALUES ('{root_alias}', 'complex/tutorial_quickstart.md', {new_pos}, 0, "
                 f"'paragraph', 'Lifecycle test paragraph.', '{{}}')"
             ),
         }, conn, state)
@@ -594,7 +598,7 @@ async def test_chain_complex_update_with_json():
     """S18: Complex UPDATE with json_extract — update only JSON code blocks."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tdir = Path(tmpdir)
-        conn, state = _setup_server(tdir)
+        conn, state, root_alias = _setup_server(tdir)
 
         # Count JSON code blocks before
         before = await srv._handle_call_tool('md_select', {
@@ -632,7 +636,7 @@ async def test_chain_delete_nested_items():
     """S19: DELETE nested list items (depth>0) while preserving top-level items."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tdir = Path(tmpdir)
-        conn, state = _setup_server(tdir)
+        conn, state, root_alias = _setup_server(tdir)
 
         # Delete all nested list items
         result = await srv._handle_call_tool('md_change', {
@@ -680,13 +684,13 @@ async def test_chain_insert_special_chars():
     """S20: INSERT with Unicode and special chars — verify content preserved."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tdir = Path(tmpdir)
-        conn, state = _setup_server(tdir)
+        conn, state, root_alias = _setup_server(tdir)
 
         # Get max pos for end-of-file insertion
         pos_result = await srv._handle_call_tool('md_select', {
             'sql': (
-                "SELECT type, file, pos_in_file FROM md "
-                "WHERE root='project' AND file='complex/technical_spec.md' "
+                f"SELECT type, file, pos_in_file FROM md "
+                f"WHERE root='{root_alias}' AND file='complex/technical_spec.md' "
                 "ORDER BY pos_in_file DESC LIMIT 1"
             ),
         }, conn, state)
@@ -700,8 +704,8 @@ async def test_chain_insert_special_chars():
         result = await srv._handle_call_tool('md_change', {
             'sql': (
                 f"INSERT INTO md (root, file, pos_in_file, depth, type, content, attrs_json) "
-                f"VALUES ('project', 'complex/technical_spec.md', {new_pos}, 0, "
-                f"'paragraph', '{special}', '{{}}')"
+                f"VALUES ('{root_alias}', 'complex/technical_spec.md', {new_pos}, 0, "
+                                f"'paragraph', '{special}', '{{}}')"
             ),
         }, conn, state)
         text = result[0].text
@@ -734,7 +738,7 @@ async def test_chain_insert_special_chars():
 async def test_select_group_by_count():
     """S21: GROUP BY with COUNT — extra column emitted as JSON."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        conn, state = conn, state = _setup_server(Path(tmpdir))
+        conn, state, root_alias = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
@@ -758,7 +762,7 @@ async def test_select_group_by_count():
 async def test_select_aggregates_mixed():
     """S22: AVG + COUNT + SUM — multiple extra columns in one row."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        conn, state = conn, state = _setup_server(Path(tmpdir))
+        conn, state, root_alias = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
@@ -784,7 +788,7 @@ async def test_select_aggregates_mixed():
 async def test_select_having_filter():
     """S23: GROUP BY + HAVING — filter groups after aggregation."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        conn, state = conn, state = _setup_server(Path(tmpdir))
+        conn, state, root_alias = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
@@ -807,7 +811,7 @@ async def test_select_having_filter():
 async def test_select_avg_content_length():
     """S24: Average content length per type with JSON alias."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        conn, state = conn, state = _setup_server(Path(tmpdir))
+        conn, state, root_alias = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
@@ -832,7 +836,7 @@ async def test_select_avg_content_length():
 async def test_select_subquery_in_where():
     """S25: Subquery in WHERE clause — filter by aggregate from subquery."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        conn, state = conn, state = _setup_server(Path(tmpdir))
+        conn, state, root_alias = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
@@ -857,7 +861,7 @@ async def test_select_subquery_in_where():
 async def test_select_stats_by_file():
     """S26: Per-file statistics with multiple aggregates and ORDER BY."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        conn, state = conn, state = _setup_server(Path(tmpdir))
+        conn, state, root_alias = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
@@ -892,7 +896,7 @@ async def test_select_stats_by_file():
 async def test_select_window_rank():
     """S27: Window function — RANK() over files by element count."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        conn, state = conn, state = _setup_server(Path(tmpdir))
+        conn, state, root_alias = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
@@ -916,15 +920,15 @@ async def test_select_window_rank():
 async def test_select_self_join_aggregate():
     """S28: Self-join — parent elements with nested child counts."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        conn, state = conn, state = _setup_server(Path(tmpdir))
+        conn, state, root_alias = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
                 "SELECT p.type, p.content, COUNT(c.id) AS children "
                 "FROM md p LEFT JOIN md c ON c.parent_pos = p.pos_in_file "
                 "AND c.root = p.root AND c.file = p.file "
-                "WHERE p.depth = 0 AND p.root = 'project' "
-                "AND p.file = 'complex/configuration_guide.md' "
+                f"WHERE p.depth = 0 AND p.root = '{root_alias}' "
+                                "AND p.file = 'complex/configuration_guide.md' "
                 "GROUP BY p.id HAVING children > 0 "
                 "ORDER BY children DESC LIMIT 10"
             ),
@@ -945,7 +949,7 @@ async def test_select_self_join_aggregate():
 async def test_select_distinct_types_json():
     """S29: DISTINCT with COUNT — verify no standard columns missing."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        conn, state = conn, state = _setup_server(Path(tmpdir))
+        conn, state, root_alias = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
@@ -970,7 +974,7 @@ async def test_select_distinct_types_json():
 async def test_select_union_all():
     """S30: UNION ALL — combine results from two queries."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        conn, state = conn, state = _setup_server(Path(tmpdir))
+        conn, state, root_alias = _setup_server(Path(tmpdir))
 
         result = await srv._handle_call_tool('md_select', {
             'sql': (
@@ -999,7 +1003,7 @@ async def test_chain_update_then_aggregate_select():
     """S31: UPDATE several rows → SELECT with GROUP BY + extra columns."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tdir = Path(tmpdir)
-        conn, state = _setup_server(tdir)
+        conn, state, root_alias = _setup_server(tdir)
 
         # Count headings per file before UPDATE
         before = await srv._handle_call_tool('md_select', {
@@ -1073,7 +1077,7 @@ async def test_chain_delete_then_aggregate_select():
     """S32: DELETE some rows → SELECT with GROUP BY verifies counts changed."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tdir = Path(tmpdir)
-        conn, state = _setup_server(tdir)
+        conn, state, root_alias = _setup_server(tdir)
 
         # Count all top-level elements per file
         before = await srv._handle_call_tool('md_select', {
@@ -1099,8 +1103,8 @@ async def test_chain_delete_then_aggregate_select():
         # Delete all tables (they exist in multiple files)
         delete = await srv._handle_call_tool('md_change', {
             'sql': (
-                "DELETE FROM md WHERE type='table' AND depth=0 "
-                "AND root='project'"
+                f"DELETE FROM md WHERE type='table' AND depth=0 "
+                f"AND root='{root_alias}'"
             ),
         }, conn, state)
         assert 'Error:' not in delete[0].text
@@ -1149,14 +1153,14 @@ async def test_chain_insert_then_aggregate_select():
     """S33: INSERT multiple elements → SELECT with GROUP BY reflects new rows."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tdir = Path(tmpdir)
-        conn, state = _setup_server(tdir)
+        conn, state, root_alias = _setup_server(tdir)
 
         # Count paragraphs before
         before = await srv._handle_call_tool('md_select', {
             'sql': (
                 "SELECT file, COUNT(*) AS cnt FROM md "
                 "WHERE type='paragraph' AND depth=0 "
-                "AND root='project' AND file='complex/tutorial_quickstart.md' "
+                f"AND root='{root_alias}' AND file='complex/tutorial_quickstart.md' "
                 "GROUP BY file"
             ),
         }, conn, state)
@@ -1171,7 +1175,7 @@ async def test_chain_insert_then_aggregate_select():
         pos_result = await srv._handle_call_tool('md_select', {
             'sql': (
                 "SELECT MAX(pos_in_file) AS max_pos FROM md "
-                "WHERE root='project' AND file='complex/tutorial_quickstart.md'"
+                f"WHERE root='{root_alias}' AND file='complex/tutorial_quickstart.md'"
             ),
         }, conn, state)
         m = re.search(r'"max_pos": (\d+)', pos_result[0].text)
@@ -1184,7 +1188,7 @@ async def test_chain_insert_then_aggregate_select():
             insert = await srv._handle_call_tool('md_change', {
                 'sql': (
                     f"INSERT INTO md (root, file, pos_in_file, depth, type, content, attrs_json) "
-                    f"VALUES ('project', 'complex/tutorial_quickstart.md', {new_pos}, 0, "
+                    f"VALUES ('{root_alias}', 'complex/tutorial_quickstart.md', {new_pos}, 0, "
                     f"'paragraph', 'Chain insert test #{i+1}', '{{}}')"
                 ),
             }, conn, state)
@@ -1195,7 +1199,7 @@ async def test_chain_insert_then_aggregate_select():
             'sql': (
                 "SELECT file, COUNT(*) AS cnt FROM md "
                 "WHERE type='paragraph' AND depth=0 "
-                "AND root='project' AND file='complex/tutorial_quickstart.md' "
+                f"AND root='{root_alias}' AND file='complex/tutorial_quickstart.md' "
                 "GROUP BY file"
             ),
         }, conn, state)

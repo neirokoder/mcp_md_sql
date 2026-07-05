@@ -31,9 +31,9 @@ def _create_test_env(tmpdir: str) -> Path:
 def _make_conn(root: Path) -> sqlite3.Connection:
     """Create a connection with loaded files for testing."""
     import sqlite3
-    cfg = RootConfig(alias="project", path=root)
+    cfg = RootConfig(path=root)
     set_roots([cfg])
-    set_root_config("project", cfg)
+    set_root_config(cfg)
     conn = get_connection()
     load_files(conn, [cfg])
     return conn
@@ -49,7 +49,7 @@ _TEST_STATE = srv._ServerState()
 class TestFormatSelectResult:
     def test_single_row(self):
         rows = [{
-            'root': 'docs',
+            'root': '/some/root/path',
             'file': 'api.md',
             'line_start': 1,
             'line_end': 1,
@@ -60,7 +60,7 @@ class TestFormatSelectResult:
             'content': '# Hello',
         }]
         result = srv._format_select_result(rows)
-        assert 'docs/\n' in result
+        assert '/some/root/path/\n' in result
         assert 'api.md' in result
         assert 'line: 1-1' in result
         assert 'pos: 1' in result
@@ -258,13 +258,14 @@ class TestServerState:
     def test_get_or_create_db_creates_and_caches(self):
         """get_or_create_db creates a new DB on first call and reuses it."""
         state = srv._ServerState()
-        cfg = RootConfig(alias="test", path=Path(tempfile.mkdtemp()))
+        path = Path(tempfile.mkdtemp())
+        cfg = RootConfig(path=path)
         # Need at least one .md file for load_files to succeed
         (cfg.path / "test.md").write_text("# Test", encoding='utf-8')
 
         conn1 = state.get_or_create_db(cfg)
         assert conn1 is not None
-        assert cfg.alias in state.databases
+        assert str(cfg.path) in state.databases
 
         conn2 = state.get_or_create_db(cfg)
         assert conn2 is conn1  # same cached connection
@@ -272,35 +273,37 @@ class TestServerState:
     def test_resolve_ide_roots_priority(self):
         """resolve_connection uses IDE roots first."""
         state = srv._ServerState()
-        cfg = RootConfig(alias="ide_root", path=Path(tempfile.mkdtemp()))
+        path = Path(tempfile.mkdtemp())
+        cfg = RootConfig(path=path)
         (cfg.path / "doc.md").write_text("# Doc", encoding='utf-8')
 
         conn = state.resolve_connection("SELECT 1", ide_roots=[cfg])
         assert conn is not None
-        assert "ide_root" in state.databases
+        assert str(cfg.path) in state.databases
 
     def test_resolve_sql_root_match(self):
         """resolve_connection uses SQL WHERE root when no IDE roots."""
         state = srv._ServerState()
-        cfg = RootConfig(alias="mydocs", path=Path(tempfile.mkdtemp()))
+        path = Path(tempfile.mkdtemp())
+        cfg = RootConfig(path=path)
         (cfg.path / "read.md").write_text("# Read", encoding='utf-8')
         state.get_or_create_db(cfg)
 
         conn = state.resolve_connection(
-            "SELECT * FROM md WHERE root='mydocs'", ide_roots=None)
+            f"SELECT * FROM md WHERE root='{str(cfg.path)}'", ide_roots=None)
         assert conn is not None
-        assert conn is state.databases["mydocs"]
+        assert conn is state.databases[str(cfg.path)]
 
     def test_resolve_sql_root_containment_match(self):
-        """resolve_connection matches root by containment."""
+        """resolve_connection matches root by full path."""
         state = srv._ServerState()
-        cfg = RootConfig(alias="project_docs", path=Path(tempfile.mkdtemp()))
+        path = Path(tempfile.mkdtemp())
+        cfg = RootConfig(path=path)
         (cfg.path / "f.md").write_text("# F", encoding='utf-8')
         state.get_or_create_db(cfg)
 
-        # 'docs' is contained in 'project_docs'
         conn = state.resolve_connection(
-            "SELECT * FROM md WHERE root='docs'", ide_roots=None)
+            f"SELECT * FROM md WHERE root='{str(cfg.path)}'", ide_roots=None)
         assert conn is not None
 
     def test_resolve_preloaded_root_found_by_sql(self):
@@ -308,13 +311,13 @@ class TestServerState:
         state = srv._ServerState()
         root_path = Path(tempfile.mkdtemp())
         (root_path / "doc.md").write_text("# Doc", encoding='utf-8')
-        cfg = RootConfig(alias="docs", path=root_path)
+        cfg = RootConfig(path=root_path)
         state.get_or_create_db(cfg)
 
         conn = state.resolve_connection(
-            "SELECT * FROM md WHERE root='docs'", ide_roots=None)
+            f"SELECT * FROM md WHERE root='{str(cfg.path)}'", ide_roots=None)
         assert conn is not None
-        assert conn is state.databases["docs"]
+        assert conn is state.databases[str(cfg.path)]
 
     def test_resolve_no_roots_returns_none(self):
         """resolve_connection returns None when no roots available."""
@@ -331,15 +334,15 @@ class TestExtractRootFromSql:
 
     def test_single_quotes(self):
         assert srv._extract_root_from_sql(
-            "SELECT * FROM md WHERE root='project'") == "project"
+            "SELECT * FROM md WHERE root='some/path'") == "some/path"
 
     def test_double_quotes(self):
         assert srv._extract_root_from_sql(
-            'SELECT * FROM md WHERE root="project"') == "project"
+            'SELECT * FROM md WHERE root="some/path"') == "some/path"
 
     def test_with_extra_conditions(self):
         assert srv._extract_root_from_sql(
-            "SELECT * FROM md WHERE root='docs' AND type='heading'") == "docs"
+            "SELECT * FROM md WHERE root='some/path' AND type='heading'") == "some/path"
 
     def test_no_where(self):
         assert srv._extract_root_from_sql(

@@ -23,7 +23,7 @@ class _FakeEvent:
 
 def _make_handler(conn, tmpdir):
     from mcp_md_sql.watcher import _MdHandler
-    cfg = RootConfig(alias='test', path=tmpdir)
+    cfg = RootConfig(path=tmpdir)
     return _MdHandler(conn, cfg)
 
 
@@ -68,7 +68,7 @@ def test_processes_md():
         handler._handle(event)
 
         rows = conn.execute(
-            "SELECT content FROM md WHERE type='heading' AND root='test' AND file='doc.md'"
+            f"SELECT content FROM md WHERE type='heading' AND root='{tmpdir}' AND file='doc.md'"
         ).fetchall()
         assert len(rows) == 1
         assert rows[0]['content'] == 'Hello'

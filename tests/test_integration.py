@@ -48,7 +48,7 @@ Updates a user.
 
         # Setup DB
         conn = get_connection()
-        roots = [RootConfig(alias="project", path=root)]
+        roots = [RootConfig(path=root)]
         set_roots(roots)
         count = load_files(conn, roots)
         assert count > 0, f"Expected > 0 rows, got {count}"
@@ -56,7 +56,7 @@ Updates a user.
         # Test md_select: get all headings
         rows = md_select(conn,
             "SELECT content, json_extract(attrs_json, '$.level') AS level "
-            "FROM md WHERE root='project' AND file='docs/api.md' AND type='heading' "
+            f"FROM md WHERE root='{str(root)}' AND file='docs/api.md' AND type='heading' "
             "ORDER BY pos_in_file")
 
         headings = [r['content'] for r in rows]
@@ -67,14 +67,14 @@ Updates a user.
 
         # Test md_select: get code blocks
         rows = md_select(conn,
-            "SELECT content FROM md WHERE type='code_block' AND root='project'")
+            f"SELECT content FROM md WHERE type='code_block' AND root='{str(root)}'")
         assert len(rows) == 1
         assert '"name": "Alice"' in rows[0]['content']
         print("✅ md_select: code blocks OK")
 
         # Test md_select: get paragraphs
         rows = md_select(conn,
-            "SELECT content FROM md WHERE type='paragraph' AND root='project' "
+            f"SELECT content FROM md WHERE type='paragraph' AND root='{str(root)}' "
             "AND file='docs/api.md'")
         contents = [r['content'] for r in rows]
         assert any('Returns list of users' in c for c in contents), f"Paragraphs: {contents}"
@@ -93,31 +93,31 @@ def test_parse_inline_elements():
         test_file.write_text("# Hello **bold** and *italic* with `code`\n", encoding='utf-8')
 
         conn = get_connection()
-        roots = [RootConfig(alias="project", path=root)]
+        roots = [RootConfig(path=root)]
         set_roots(roots)
         load_files(conn, roots)
 
         # Check heading
         rows = md_select(conn,
-            "SELECT * FROM md WHERE type='heading' AND root='project'")
+            f"SELECT * FROM md WHERE type='heading' AND root='{str(root)}'")
         assert len(rows) == 1
         assert rows[0]['content'] == 'Hello bold and italic with code'
 
         # Check inline elements
         strong_rows = md_select(conn,
-            "SELECT * FROM md WHERE type='strong' AND root='project'")
+            f"SELECT * FROM md WHERE type='strong' AND root='{str(root)}'")
         assert len(strong_rows) == 1
         assert strong_rows[0]['content'] == 'bold'
         assert strong_rows[0]['parent_pos'] == rows[0]['pos_in_file']
 
         em_rows = md_select(conn,
-            "SELECT * FROM md WHERE type='emphasis' AND root='project'")
+            f"SELECT * FROM md WHERE type='emphasis' AND root='{str(root)}'")
         assert len(em_rows) == 1
         assert em_rows[0]['content'] == 'italic'
         assert em_rows[0]['parent_pos'] == rows[0]['pos_in_file']
 
         code_rows = md_select(conn,
-            "SELECT * FROM md WHERE type='inline_code' AND root='project'")
+            f"SELECT * FROM md WHERE type='inline_code' AND root='{str(root)}'")
         assert len(code_rows) == 1
         assert code_rows[0]['content'] == 'code'
         assert code_rows[0]['parent_pos'] == rows[0]['pos_in_file']
@@ -145,7 +145,7 @@ Removes a user.
 """, encoding='utf-8')
 
         conn = get_connection()
-        roots = [RootConfig(alias="project", path=root)]
+        roots = [RootConfig(path=root)]
         set_roots(roots)
         load_files(conn, roots)
 
@@ -160,7 +160,7 @@ Removes a user.
         assert change['operation'] == 'update'
         assert change['old_content'] == 'PUT /users/{id}'
         assert change['new_content'] == 'PATCH /users/{id}'
-        assert 'project:docs/api.md' in result['files_changed']
+        assert f'{str(root)}:docs/api.md' in result['files_changed']
         print("✅ md_change UPDATE: diff OK")
 
         # Verify file was patched
@@ -172,7 +172,7 @@ Removes a user.
         # Verify DB was reloaded (pos_in_file, line_start/end updated)
         rows = md_select(conn,
             "SELECT pos_in_file, line_start, line_end FROM md "
-            "WHERE root='project' AND file='docs/api.md' AND type='heading' "
+            f"WHERE root='{str(root)}' AND file='docs/api.md' AND type='heading' "
             "AND content='PATCH /users/{id}'")
         assert len(rows) >= 1
         assert rows[0]['line_start'] is not None
@@ -200,7 +200,7 @@ Old method.
 """, encoding='utf-8')
 
         conn = get_connection()
-        roots = [RootConfig(alias="project", path=root)]
+        roots = [RootConfig(path=root)]
         set_roots(roots)
         load_files(conn, roots)
 
@@ -233,18 +233,18 @@ List users.
 """, encoding='utf-8')
 
         conn = get_connection()
-        roots = [RootConfig(alias="project", path=root)]
+        roots = [RootConfig(path=root)]
         set_roots(roots)
         load_files(conn, roots)
 
         # Get last pos_in_file
         rows = md_select(conn,
-            "SELECT MAX(pos_in_file) as max_pos FROM md WHERE root='project' AND file='docs/api.md'")
+            f"SELECT MAX(pos_in_file) as max_pos FROM md WHERE root='{str(root)}' AND file='docs/api.md'")
         max_pos = rows[0]['max_pos']
 
         result = md_change(conn,
             f"INSERT INTO md (root, file, pos_in_file, depth, type, content, attrs_json) "
-            f"VALUES ('project', 'docs/api.md', {max_pos + 1}, 1, 'paragraph', 'New paragraph', '{{}}')")
+            f"VALUES ('{str(root)}', 'docs/api.md', {max_pos + 1}, 1, 'paragraph', 'New paragraph', '{{}}')")
 
         assert len(result['changes']) >= 1
         assert result['changes'][0]['operation'] == 'insert'
@@ -267,14 +267,14 @@ def test_insert_rejects_id():
         test_file.write_text("# Test\n", encoding='utf-8')
 
         conn = get_connection()
-        roots = [RootConfig(alias="project", path=root)]
+        roots = [RootConfig(path=root)]
         set_roots(roots)
         load_files(conn, roots)
 
         try:
             md_change(conn,
                 "INSERT INTO md (id, root, file, type, content) "
-                "VALUES (999, 'project', 'docs/test.md', 'paragraph', 'bad')")
+                f"VALUES (999, '{str(root)}', 'docs/test.md', 'paragraph', 'bad')")
             assert False, "Should have raised ToolError"
         except ToolError as e:
             assert 'id' in str(e).lower()
@@ -302,7 +302,7 @@ More old content.
 """, encoding='utf-8')
 
         conn = get_connection()
-        roots = [RootConfig(alias="project", path=root)]
+        roots = [RootConfig(path=root)]
         set_roots(roots)
         load_files(conn, roots)
 
@@ -340,21 +340,21 @@ First paragraph.
 """, encoding='utf-8')
 
         conn = get_connection()
-        roots = [RootConfig(alias="project", path=root)]
+        roots = [RootConfig(path=root)]
         set_roots(roots)
         load_files(conn, roots)
 
         # Get current positions
         before = md_select(conn,
             "SELECT pos_in_file, type, content FROM md "
-            "WHERE root='project' AND file='docs/shift.md' ORDER BY pos_in_file")
+            f"WHERE root='{str(root)}' AND file='docs/shift.md' ORDER BY pos_in_file")
         before_positions = [r['pos_in_file'] for r in before]
         print(f"  Before: {before_positions}")
 
         # Insert at position 2 (after heading, before paragraph)
         result = md_change(conn,
             "INSERT INTO md (root, file, pos_in_file, depth, type, content, attrs_json) "
-            "VALUES ('project', 'docs/shift.md', 2, 0, 'paragraph', 'INSERTED paragraph', '{}')")
+            f"VALUES ('{str(root)}', 'docs/shift.md', 2, 0, 'paragraph', 'INSERTED paragraph', '{{}}')")
 
         assert result['changes'][0]['operation'] == 'insert'
         print("✅ test_insert_with_position_shift: insert OK")
@@ -362,7 +362,7 @@ First paragraph.
         # Verify positions shifted
         after = md_select(conn,
             "SELECT pos_in_file, type, content FROM md "
-            "WHERE root='project' AND file='docs/shift.md' ORDER BY pos_in_file")
+            f"WHERE root='{str(root)}' AND file='docs/shift.md' ORDER BY pos_in_file")
 
         # The original elements that were at pos >= 2 should have shifted
         contents = [r['content'] for r in after]
@@ -384,7 +384,7 @@ def test_update_inline_element():
         test_file.write_text("Hello **world** today\n", encoding='utf-8')
 
         conn = get_connection()
-        roots = [RootConfig(alias="project", path=root)]
+        roots = [RootConfig(path=root)]
         set_roots(roots)
         load_files(conn, roots)
 
@@ -419,7 +419,7 @@ def test_delete_inline_element():
         test_file.write_text("Hello **world** today\n", encoding='utf-8')
 
         conn = get_connection()
-        roots = [RootConfig(alias="project", path=root)]
+        roots = [RootConfig(path=root)]
         set_roots(roots)
         load_files(conn, roots)
 
@@ -451,14 +451,14 @@ def test_insert_with_special_chars():
         test_file.write_text("# Title\n", encoding='utf-8')
 
         conn = get_connection()
-        roots = [RootConfig(alias="project", path=root)]
+        roots = [RootConfig(path=root)]
         set_roots(roots)
         load_files(conn, roots)
 
         # INSERT with single quotes and special chars in content
         result = md_change(conn,
             "INSERT INTO md (root, file, type, content, depth) "
-            "VALUES ('project', 'special.md', 'paragraph', \"It's a 'test'\", 0)")
+            f"VALUES ('{str(root)}', 'special.md', 'paragraph', \"It's a 'test'\", 0)")
         assert len(result['changes']) == 1
         assert result['changes'][0]['operation'] == 'insert'
         print("test_insert_with_special_chars PASSED")
@@ -472,14 +472,14 @@ def test_insert_with_escaped_apostrophe():
         test_file.write_text("# Title\n", encoding='utf-8')
 
         conn = get_connection()
-        roots = [RootConfig(alias="project", path=root)]
+        roots = [RootConfig(path=root)]
         set_roots(roots)
         load_files(conn, roots)
 
         # SQL escaping '' → ' inside single-quoted string
         result = md_change(conn,
             "INSERT INTO md (root, file, type, content, depth) "
-            "VALUES ('project', 'apostrophe.md', 'paragraph', 'User''s name', 0)")
+            f"VALUES ('{str(root)}', 'apostrophe.md', 'paragraph', 'User''s name', 0)")
 
         assert len(result['changes']) == 1
         assert result['changes'][0]['operation'] == 'insert'
@@ -506,7 +506,7 @@ def test_update_rejects_direct_id():
         test_file.write_text("# Title\n", encoding='utf-8')
 
         conn = get_connection()
-        roots = [RootConfig(alias="project", path=root)]
+        roots = [RootConfig(path=root)]
         set_roots(roots)
         load_files(conn, roots)
 
@@ -536,7 +536,7 @@ def test_update_allows_id_in_string():
         test_file.write_text("# Old Title\n", encoding='utf-8')
 
         conn = get_connection()
-        roots = [RootConfig(alias="project", path=root)]
+        roots = [RootConfig(path=root)]
         set_roots(roots)
         load_files(conn, roots)
 
@@ -560,30 +560,30 @@ def test_update_tracks_freshly_inserted_row():
         file_b.write_text("# From B\n", encoding='utf-8')
 
         conn = get_connection()
-        roots = [RootConfig(alias="project", path=root)]
+        roots = [RootConfig(path=root)]
         set_roots(roots)
         load_files(conn, roots)
 
         # Step 1: UPDATE file_a
         r1 = md_change(conn,
-            "UPDATE md SET content = 'Modified A' WHERE root = 'project' AND file = 'a.md' AND type = 'heading'")
+            f"UPDATE md SET content = 'Modified A' WHERE root = '{str(root)}' AND file = 'a.md' AND type = 'heading'")
         assert len(r1['changes']) == 1
 
         # Step 2: INSERT a new element INTO a.md
         r2 = md_change(conn,
             "INSERT INTO md (root, file, type, content, depth) "
-            "VALUES ('project', 'a.md', 'paragraph', 'New in A', 0)")
+            f"VALUES ('{str(root)}', 'a.md', 'paragraph', 'New in A', 0)")
         assert len(r2['changes']) == 1
 
         # Step 3: UPDATE file_b only
         r3 = md_change(conn,
-            "UPDATE md SET content = 'Modified B' WHERE root = 'project' AND file = 'b.md' AND type = 'heading'")
+            f"UPDATE md SET content = 'Modified B' WHERE root = '{str(root)}' AND file = 'b.md' AND type = 'heading'")
         assert len(r3['changes']) == 1
 
         # Step 4: UPDATE the freshly inserted row in a.md
         # Must produce exactly 1 change (deterministic by id, not fragile version check)
         result = md_change(conn,
-            "UPDATE md SET content = 'Updated New In A' WHERE root = 'project' AND file = 'a.md' AND type = 'paragraph'")
+            f"UPDATE md SET content = 'Updated New In A' WHERE root = '{str(root)}' AND file = 'a.md' AND type = 'paragraph'")
         changes = result['changes']
         print(f"changes: {changes}")
         assert len(changes) == 1, (
@@ -605,7 +605,7 @@ def test_insert_integrity_check():
         test_file.write_text("# First\n\n## Second\n\nParagraph.\n", encoding='utf-8')
 
         conn = get_connection()
-        roots = [RootConfig(alias="proj", path=root)]
+        roots = [RootConfig(path=root)]
         set_roots(roots)
         load_files(conn, roots)
 
@@ -614,7 +614,7 @@ def test_insert_integrity_check():
         # Insert a paragraph between heading and sub-heading
         result = md_change(conn,
             "INSERT INTO md (root, file, type, content, depth, pos_in_file) "
-            "VALUES ('proj', 'integrity.md', 'paragraph', 'Inserted para', 0, 3)")
+            f"VALUES ('{str(root)}', 'integrity.md', 'paragraph', 'Inserted para', 0, 3)")
         assert len(result['changes']) == 1
         assert result['changes'][0]['operation'] == 'insert'
 
@@ -646,20 +646,20 @@ async def test_insert_with_subquery_pos():
         pass  # keep tmpdir alive for the test scope
 
     conn = get_connection()
-    roots = [RootConfig(alias="proj", path=root)]
+    roots = [RootConfig(path=root)]
     set_roots(roots)
     load_files(conn, roots)
 
     # Get max pos before insert
     before_max = md_select(conn,
-        "SELECT MAX(pos_in_file) as max_pos FROM md WHERE root='proj' AND file='docs/api.md'")
+        f"SELECT MAX(pos_in_file) as max_pos FROM md WHERE root='{str(root)}' AND file='docs/api.md'")
     max_before = before_max[0]['max_pos']
 
     # INSERT with subquery as pos_in_file
     result = md_change(conn,
         "INSERT INTO md (root, file, pos_in_file, depth, type, content, attrs_json) "
-        "VALUES ('proj', 'docs/api.md', "
-        "(SELECT MAX(pos_in_file)+1 FROM md WHERE root='proj' AND file='docs/api.md'), "
+        f"VALUES ('{str(root)}', 'docs/api.md', "
+        f"(SELECT MAX(pos_in_file)+1 FROM md WHERE root='{str(root)}' AND file='docs/api.md'), "
         "0, 'paragraph', 'Inserted via subquery', '{}')")
 
     assert result['changes'][0]['operation'] == 'insert'
@@ -672,7 +672,7 @@ async def test_insert_with_subquery_pos():
     # Verify DB has the row at the correct position
     rows = md_select(conn,
         "SELECT pos_in_file, content FROM md "
-        "WHERE root='proj' AND file='docs/api.md' AND content='Inserted via subquery'")
+        f"WHERE root='{str(root)}' AND file='docs/api.md' AND content='Inserted via subquery'")
     assert len(rows) == 1
     assert rows[0]['pos_in_file'] == max_before + 1
 
@@ -689,23 +689,23 @@ def test_update_preserves_ids():
         test_file.write_text("# A\n\nPara.\n\n## B\n", encoding='utf-8')
 
         conn = get_connection()
-        roots = [RootConfig(alias="r", path=root)]
+        roots = [RootConfig(path=root)]
         set_roots(roots)
         load_files(conn, roots)
 
         # Capture ids before
         before_ids = md_select(conn,
-            "SELECT id FROM md WHERE root='r' AND file='docs/ids.md' ORDER BY pos_in_file")
+            f"SELECT id FROM md WHERE root='{str(root)}' AND file='docs/ids.md' ORDER BY pos_in_file")
         before_list = [r['id'] for r in before_ids]
 
         # UPDATE a paragraph
         md_change(conn,
             "UPDATE md SET content = 'Updated para' "
-            "WHERE root='r' AND file='docs/ids.md' AND type='paragraph'")
+            f"WHERE root='{str(root)}' AND file='docs/ids.md' AND type='paragraph'")
 
         # Verify ids unchanged
         after_ids = md_select(conn,
-            "SELECT id FROM md WHERE root='r' AND file='docs/ids.md' ORDER BY pos_in_file")
+            f"SELECT id FROM md WHERE root='{str(root)}' AND file='docs/ids.md' ORDER BY pos_in_file")
         after_list = [r['id'] for r in after_ids]
 
         assert after_list == before_list, f"Ids changed: before={before_list}, after={after_list}"
@@ -722,22 +722,22 @@ def test_delete_preserves_ids():
         test_file.write_text("# A\n\nPara.\n\n## B\n\nBody.\n", encoding='utf-8')
 
         conn = get_connection()
-        roots = [RootConfig(alias="r", path=root)]
+        roots = [RootConfig(path=root)]
         set_roots(roots)
         load_files(conn, roots)
 
         # Capture all ids
         before = md_select(conn,
-            "SELECT id, content FROM md WHERE root='r' AND file='docs/ids.md' ORDER BY pos_in_file")
+            f"SELECT id, content FROM md WHERE root='{str(root)}' AND file='docs/ids.md' ORDER BY pos_in_file")
         before_map = {r['content']: r['id'] for r in before}
 
         # Delete the paragraph
         md_change(conn,
-            "DELETE FROM md WHERE root='r' AND file='docs/ids.md' AND type='paragraph'")
+            f"DELETE FROM md WHERE root='{str(root)}' AND file='docs/ids.md' AND type='paragraph'")
 
         # Verify remaining rows keep their ids
         after = md_select(conn,
-            "SELECT id, content FROM md WHERE root='r' AND file='docs/ids.md' ORDER BY pos_in_file")
+            f"SELECT id, content FROM md WHERE root='{str(root)}' AND file='docs/ids.md' ORDER BY pos_in_file")
         for r in after:
             expected_id = before_map.get(r['content'])
             assert expected_id is not None, f"Content {r['content']!r} not found before"
@@ -757,14 +757,14 @@ def test_update_inline_adds_lines():
         test_file.write_text("# Top\n\nHello **world** today\n\n## Bottom\n", encoding='utf-8')
 
         conn = get_connection()
-        roots = [RootConfig(alias="r", path=root)]
+        roots = [RootConfig(path=root)]
         set_roots(roots)
         load_files(conn, roots)
 
         # Capture state before
         before_rows = md_select(conn,
             "SELECT id, line_start, line_end, type, content FROM md "
-            "WHERE root='r' AND file='docs/inline.md' ORDER BY pos_in_file")
+            f"WHERE root='{str(root)}' AND file='docs/inline.md' ORDER BY pos_in_file")
         before = {r['type']: r for r in before_rows}
 
         # Get heading 'Bottom' line_start before update
@@ -782,7 +782,7 @@ def test_update_inline_adds_lines():
         # After state
         after_rows = md_select(conn,
             "SELECT id, line_start, line_end, type, content FROM md "
-            "WHERE root='r' AND file='docs/inline.md' ORDER BY pos_in_file")
+            f"WHERE root='{str(root)}' AND file='docs/inline.md' ORDER BY pos_in_file")
 
         # Verify paragraph (parent) line_end shifted
         para_after = [r for r in after_rows if r['type'] == 'paragraph'][0]
@@ -819,7 +819,7 @@ def test_update_where_in_string_content():
         )
 
         conn = get_connection()
-        roots = [RootConfig(alias="r", path=root)]
+        roots = [RootConfig(path=root)]
         set_roots(roots)
         load_files(conn, roots)
 
@@ -855,7 +855,7 @@ def test_update_escaped_quote_in_content():
         )
 
         conn = get_connection()
-        roots = [RootConfig(alias="r", path=root)]
+        roots = [RootConfig(path=root)]
         set_roots(roots)
         load_files(conn, roots)
 
@@ -888,7 +888,7 @@ def test_update_double_quoted_content():
         )
 
         conn = get_connection()
-        roots = [RootConfig(alias="r", path=root)]
+        roots = [RootConfig(path=root)]
         set_roots(roots)
         load_files(conn, roots)
 

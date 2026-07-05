@@ -80,7 +80,7 @@ def db():
         (docs / "large.md").write_text("".join(large_lines), encoding='utf-8')
 
         conn = get_connection()
-        cfg = [RootConfig(alias="project", path=docs)]
+        cfg = [RootConfig(path=docs)]
         set_roots(cfg)
         load_files(conn, cfg)
 
@@ -285,7 +285,9 @@ def test_file_element_count_grouped(db):
     """24. Element count per file per root."""
     r = rows(db, "SELECT root, file, COUNT(*) AS cnt FROM md GROUP BY root, file ORDER BY file")
     assert len(r) >= 3
-    assert all(row['root'] == 'project' for row in r)
+    # All rows should have the same root (the full path)
+    roots = {row['root'] for row in r}
+    assert len(roots) == 1, f"Expected 1 unique root, got {len(roots)}: {roots}"
 
 
 def test_block_types_summary(db):
@@ -366,9 +368,11 @@ def test_md_select_ddl(db):
 
 def test_md_change_insert_or_replace(db):
     """INSERT OR REPLACE works (parser handles OR modifier)."""
+    # Get the actual root value stored in the DB
+    root_val = db.execute("SELECT DISTINCT root FROM md LIMIT 1").fetchone()[0]
     result = md_change(db,
-        "INSERT OR REPLACE INTO md (root, file, type, content, depth) "
-        "VALUES ('project', 'api.md', 'paragraph', 'Inserted via OR REPLACE', 0)")
+        f"INSERT OR REPLACE INTO md (root, file, type, content, depth) "
+        f"VALUES ('{root_val}', 'api.md', 'paragraph', 'Inserted via OR REPLACE', 0)")
     assert len(result['changes']) == 1
     assert result['changes'][0]['operation'] == 'insert'
 
@@ -382,8 +386,9 @@ def test_md_change_empty_sql(db):
 # ── Config tests ───────────────────────────────────────────────────────────────
 
 def test_parse_doc_roots_json():
-    """JSON array of paths -> basename as alias."""
+    """JSON array of paths -> full resolved path."""
     import os
+    from pathlib import Path
     old = os.environ.get("DOC_ROOTS")
     try:
         if "DOC_ROOTS" in os.environ:
@@ -391,8 +396,8 @@ def test_parse_doc_roots_json():
         os.environ["DOC_ROOTS"] = '["/tmp/x", "/tmp/y"]'
         roots = parse_doc_roots()
         assert len(roots) == 2
-        assert roots[0].alias == 'x'
-        assert roots[1].alias == 'y'
+        assert str(roots[0].path) == str(Path("/tmp/x").resolve())
+        assert str(roots[1].path) == str(Path("/tmp/y").resolve())
     finally:
         if old is not None:
             os.environ["DOC_ROOTS"] = old
@@ -426,8 +431,9 @@ def test_parse_doc_roots_malformed():
 
 
 def test_parse_doc_roots_multiple():
-    """Multiple valid pairs."""
+    """Multiple valid pairs → full resolved path."""
     import os
+    from pathlib import Path
     old = os.environ.get("DOC_ROOTS")
     try:
         if "DOC_ROOTS" in os.environ:
@@ -435,8 +441,8 @@ def test_parse_doc_roots_multiple():
         os.environ["DOC_ROOTS"] = "a=/tmp/a;b=C:/tmp/b"
         roots = parse_doc_roots()
         assert len(roots) == 2
-        assert roots[0].alias == 'a'
-        assert roots[1].alias == 'b'
+        assert str(roots[0].path) == str(Path("/tmp/a").resolve())
+        assert str(roots[1].path) == str(Path("C:/tmp/b").resolve())
     finally:
         if old is not None:
             os.environ["DOC_ROOTS"] = old
@@ -523,7 +529,7 @@ def test_update_nonexistent_file(monkeypatch):
         md_file = root / 'doc.md'
         md_file.write_text('# Hello\n', encoding='utf-8')
 
-        cfg = [RootConfig(alias='test', path=root)]
+        cfg = [RootConfig(path=root)]
         set_roots(cfg)
         load_files(conn, cfg)
 
@@ -546,7 +552,7 @@ def test_delete_nonexistent_file(monkeypatch):
         md_file = root / 'doc.md'
         md_file.write_text('# Hello\n', encoding='utf-8')
 
-        cfg = [RootConfig(alias='test', path=root)]
+        cfg = [RootConfig(path=root)]
         set_roots(cfg)
         load_files(conn, cfg)
 

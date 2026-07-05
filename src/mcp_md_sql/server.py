@@ -54,7 +54,9 @@ def _format_select_result(rows: list[dict]) -> str:
         depth = r.get('depth')
         if depth:
             parts.append(f'depth: {depth}')
-        parts.append(f'type: {r.get("type", "?")}')
+        t = r.get('type')
+        if t:
+            parts.append(f'type: {t}')
 
         meta = f'{root_prefix}{file_} ({', '.join(parts)})\n---'
         content = (r.get('content') or '').rstrip('\n')
@@ -81,19 +83,19 @@ class _ServerState:
 
     def get_or_create_db(self, root_cfg: RootConfig) -> sqlite3.Connection:
         """Get existing database for a root or create a new one with loaded files."""
-        alias = root_cfg.alias
-        if alias in self.databases:
-            return self.databases[alias]
+        key = str(root_cfg.path)
+        if key in self.databases:
+            return self.databases[key]
 
         conn = get_connection()
         count = load_files(conn, [root_cfg])
-        self.databases[alias] = conn
-        set_root_config(alias, root_cfg)
-        logger.info("Created DB for root '%s' (%s) — loaded %d rows", alias, root_cfg.path, count)
+        self.databases[key] = conn
+        set_root_config(root_cfg)
+        logger.info("Created DB for root '%s' — loaded %d rows", key, count)
 
         w = FileWatcher(conn)
         w.start([root_cfg])
-        self.watchers[alias] = w
+        self.watchers[key] = w
 
         return conn
 
@@ -159,16 +161,15 @@ async def _try_load_roots(session) -> list[RootConfig] | None:
         roots = []
         for r in result.roots:
             uri = urlparse(str(r.uri))
-            alias = r.name or "root"
             if uri.scheme == 'file':
                 path = Path(url2pathname(uri.path))
             else:
                 path = Path(str(r.uri))
-            roots.append(RootConfig(alias=alias, path=path.resolve()))
+            roots.append(RootConfig(path=path.resolve()))
         logger.info("Got %d root(s) from IDE: %s", len(roots), [r.path for r in roots])
         return roots
     except asyncio.TimeoutError:
-        logger.warning("IDE did not respond to roots/list request within 2s — using fallback")
+        logger.warning("IDE did not respond to roots/list request within 2s")
         return None
     except Exception as e:
         logger.warning("Failed to get roots from IDE: %s", e)
@@ -238,8 +239,7 @@ def _build_server(state: _ServerState) -> Server:
                     type="text",
                     text=f"Error: root_path must be a directory: {root_path}",
                 )]
-            alias = path.name or "root"
-            cfg = RootConfig(alias=alias, path=path)
+            cfg = RootConfig(path=path)
             conn = state.get_or_create_db(cfg)
             return await _handle_call_tool(name, arguments, conn, state)
 
@@ -284,7 +284,7 @@ async def _handle_call_tool(name: str, arguments: dict,
             # Notify watcher to ignore the files we just wrote
             if state:
                 for key in result.get("files_changed", []):
-                    r, f = key.split(":", 1)
+                    r, f = key.rsplit(":", 1)
                     watcher = state.watchers.get(r)
                     if watcher:
                         watcher.ignore_path(r, f)

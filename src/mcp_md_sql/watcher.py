@@ -64,7 +64,7 @@ class _MdHandler(FileSystemEventHandler):
             return
 
         root_path = self.root_config.path
-        root_alias = self.root_config.alias
+        root_alias = str(self.root_config.path)
         try:
             rel = str(Path(path).relative_to(root_path)).replace('\\', '/')
         except ValueError:
@@ -95,9 +95,9 @@ class FileWatcher:
                 logger.warning("Watcher: path not found: %s", cfg.path)
                 continue
             handler = _MdHandler(self.conn, cfg)
-            self.handlers[cfg.alias] = handler
+            self.handlers[str(cfg.path)] = handler
             self.observer.schedule(handler, str(cfg.path), recursive=True)
-            logger.info("Watcher: watching %s -> %s", cfg.alias, cfg.path)
+            logger.info("Watcher: watching %s", cfg.path)
 
         self.observer.start()
 

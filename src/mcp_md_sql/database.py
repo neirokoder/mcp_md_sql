@@ -74,7 +74,7 @@ def load_files(conn: sqlite3.Connection, roots: list[RootConfig] | None = None) 
             rows = []
             for el in elements:
                 rows.append((
-                    root_cfg.alias,
+                    str(root_cfg.path),
                     rel_path,
                     el.line_start,
                     el.line_end,

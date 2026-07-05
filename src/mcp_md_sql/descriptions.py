@@ -6,13 +6,14 @@ MD_CHANGE_DESCRIPTION = "Edits md files via SQL INSERT/UPDATE/DELETE queries wit
 
 ROOT_PATH_DESC = (
     "Absolute path to the project root directory. "
+    "In the `md` table, `root` stores the full absolute path. "
 )
 
 SQL_SELECT_DESC = """\
 Execute SELECT queries (standard SQLite SQL) against parsed Markdown.
 
 Table `md` (parsed AST of .md files):
-    root (alias for doc root, nullable for fallback),
+    root (полный абсолютный путь к корню документации),  # e.g. "/project/docs"
     file (relative path),
     line_start, line_end (1-based inclusive),
     pos_in_file (0-based char offset),

@@ -13,23 +13,11 @@ from pathlib import Path
 
 @dataclass
 class RootConfig:
-    alias: str
     path: Path
 
 
 # Module-level cache for roots (can be set programmatically for tests)
 _roots: list[RootConfig] | None = None
-
-
-def _generate_alias(path: Path, used: set[str]) -> str:
-    """Generate unique alias from path basename."""
-    base = path.name or "root"
-    alias = base
-    i = 1
-    while alias in used:
-        alias = f"{base}_{i}"
-        i += 1
-    return alias
 
 
 def parse_doc_roots() -> list[RootConfig]:
@@ -44,7 +32,6 @@ def parse_doc_roots() -> list[RootConfig]:
         return []
 
     roots: list[RootConfig] = []
-    used_aliases: set[str] = set()
 
     # Try JSON array of paths
     if raw.strip().startswith('['):
@@ -56,9 +43,7 @@ def parse_doc_roots() -> list[RootConfig]:
                         path_str = item.strip()
                         if path_str:
                             path = Path(path_str).resolve()
-                            alias = _generate_alias(path, used_aliases)
-                            used_aliases.add(alias)
-                            roots.append(RootConfig(alias=alias, path=path))
+                            roots.append(RootConfig(path=path))
                 if roots:
                     return roots
         except (json.JSONDecodeError, Exception):
@@ -71,15 +56,11 @@ def parse_doc_roots() -> list[RootConfig]:
         if "=" not in pair:
             continue
         eq_idx = pair.index("=")
-        alias = pair[:eq_idx].strip()
         path_str = pair[eq_idx + 1:].strip()
-        if not alias or not path_str:
+        if not path_str:
             continue
         path = Path(path_str).resolve()
-        if alias in used_aliases:
-            alias = _generate_alias(path, used_aliases)
-        used_aliases.add(alias)
-        roots.append(RootConfig(alias=alias, path=path))
+        roots.append(RootConfig(path=path))
 
     return roots
 

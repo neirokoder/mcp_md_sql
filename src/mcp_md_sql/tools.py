@@ -25,9 +25,9 @@ logger = logging.getLogger(__name__)
 _root_configs: dict[str, RootConfig] = {}
 
 
-def set_root_config(alias: str, cfg: RootConfig) -> None:
-    """Register a root config for alias lookup."""
-    _root_configs[alias] = cfg
+def set_root_config(cfg: RootConfig) -> None:
+    """Register a root config for path lookup."""
+    _root_configs[str(cfg.path)] = cfg  # register by full path
 
 
 def clear_root_configs() -> None:
@@ -35,17 +35,20 @@ def clear_root_configs() -> None:
     _root_configs.clear()
 
 
-def get_root_path(alias: str) -> Path:
-    """Find the filesystem path for a root alias."""
-    # First: check get_doc_roots (authoritative, set by tests and server)
+def get_root_path(root_val: str) -> Path:
+    """Find the filesystem path for a root identifier.
+
+    Accepts the full absolute path.
+    """
+    # First: check _root_configs cache (registered by full path)
+    if root_val in _root_configs:
+        return _root_configs[root_val].path
+    # Fallback: check get_doc_roots by full path
     for cfg in get_doc_roots():
-        if cfg.alias == alias:
-            _root_configs[alias] = cfg  # update cache
+        if str(cfg.path) == root_val:
+            _root_configs[root_val] = cfg  # update cache
             return cfg.path
-    # Fallback: check per-root registry cache
-    if alias in _root_configs:
-        return _root_configs[alias].path
-    raise ToolError(f"Unknown root alias: {alias}")
+    raise ToolError(f"Unknown root: {root_val}")
 
 TIMEOUT_SEC = 15
 FORBIDDEN_DDL = re.compile(
@@ -538,7 +541,7 @@ def _handle_update(conn: sqlite3.Connection, sql: str) -> dict[str, Any]:
 
     # Patch affected files — no full reload (preserves row ids)
     for key in affected_files:
-        r, f = key.split(':', 1)
+        r, f = key.rsplit(':', 1)
         patches = _patch_file_update(conn, r, f, before_map, after_map)
         if patches:
             _reload_after_update(conn, r, f, patches)
