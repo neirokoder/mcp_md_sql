@@ -276,12 +276,12 @@ class TestUriToPath:
 
 @pytest.mark.asyncio
 async def test_resolve_roots_no_context():
-    """_resolve_roots без request context (None server) → None, флаг failed."""
+    """_resolve_roots без request context (None server) → None, не падает."""
     srv._resolved_roots = None
     srv._roots_probe_failed = False
     result = await srv._resolve_roots(None)
     assert result is None
-    assert srv._roots_probe_failed is True
+    assert srv._roots_probe_failed is False  # _resolve_roots не ставит флаг — это init handler
 
 
 @pytest.mark.asyncio

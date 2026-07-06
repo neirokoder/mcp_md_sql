@@ -308,14 +308,17 @@ async def _handle_debug(server) -> list[types.TextContent]:
             else:
                 info["client_capabilities"] = None
 
-            # Live list_roots probe (with timeout)
-            try:
-                res = await asyncio.wait_for(session.list_roots(), timeout=3)
-                info["list_roots_probe"] = res.model_dump(mode="json", exclude_none=True)
-            except asyncio.TimeoutError:
-                info["list_roots_probe"] = {"error": "TimeoutError: list_roots timed out after 3s"}
-            except Exception as e:
-                info["list_roots_probe"] = {"error": f"{type(e).__name__}: {e}"}
+            # Live list_roots probe (only if client declared capability)
+            if caps is not None and caps.roots is not None:
+                try:
+                    res = await asyncio.wait_for(session.list_roots(), timeout=3)
+                    info["list_roots_probe"] = res.model_dump(mode="json", exclude_none=True)
+                except asyncio.TimeoutError:
+                    info["list_roots_probe"] = {"error": "TimeoutError: list_roots timed out after 3s"}
+                except Exception as e:
+                    info["list_roots_probe"] = {"error": f"{type(e).__name__}: {e}"}
+            else:
+                info["list_roots_probe"] = {"status": "client did not declare roots capability"}
         except LookupError:
             info["client_capabilities"] = "LookupError — called outside request context"
         except Exception as e:
