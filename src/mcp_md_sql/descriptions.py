@@ -7,6 +7,8 @@ MD_CHANGE_DESCRIPTION = "Edits md files via SQL INSERT/UPDATE/DELETE queries wit
 ROOT_PATH_DESC = (
     "Absolute path to the project root directory. "
     "In the `md` table, `root` stores the full absolute path. "
+    "Optional — if omitted, root is resolved from IDE roots (MCP list_roots), "
+    "then DOC_ROOTS env. "
 )
 
 SQL_SELECT_DESC = """\
@@ -45,3 +47,10 @@ UPDATE and DELETE require a WHERE clause (rejected otherwise).
 
 Table `md` columns same as md_select.
 """
+
+MD_DEBUG_DESCRIPTION = (
+    "Diagnostics tool. Returns the full MCP server state: connection status, "
+    "environment variables, database counts, client capabilities, and a "
+    "list_roots() probe result. Temporary — for debugging root resolution. "
+    "Takes no parameters."
+)

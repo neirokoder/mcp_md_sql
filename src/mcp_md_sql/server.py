@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 from pathlib import Path
+from urllib.parse import urlparse, unquote
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -16,7 +18,14 @@ import mcp.types as types
 
 from .config import RootConfig, get_doc_roots
 from .database import get_connection, load_files
-from .descriptions import MD_SELECT_DESCRIPTION, MD_CHANGE_DESCRIPTION, SQL_SELECT_DESC, SQL_CHANGE_DESC, ROOT_PATH_DESC
+from .descriptions import (
+    MD_SELECT_DESCRIPTION,
+    MD_CHANGE_DESCRIPTION,
+    SQL_SELECT_DESC,
+    SQL_CHANGE_DESC,
+    ROOT_PATH_DESC,
+    MD_DEBUG_DESCRIPTION,
+)
 from .tools import md_select, md_change, ToolError
 from .watcher import FileWatcher
 
@@ -24,10 +33,53 @@ from .watcher import FileWatcher
 # Global state — single connection and watcher shared across tool calls
 _conn: sqlite3.Connection | None = None
 _watcher: FileWatcher | None = None
+_resolved_roots: list[RootConfig] | None = None
+_roots_probe_failed: bool = False
 
 
 STANDARD_COLS = {'root', 'file', 'line_start', 'line_end', 'pos_in_file',
                  'parent_pos', 'depth', 'type', 'content', 'attrs_json'}
+
+
+def _uri_to_path(uri: str) -> Path | None:
+    """Convert file:// URI to Path. Returns None for non-file schemes."""
+    p = urlparse(uri)
+    if p.scheme != 'file':
+        return None
+    raw = unquote(p.path)
+    if p.netloc:
+        raw = p.netloc + raw
+    # Windows: /C:/proj → C:/proj
+    if raw.startswith('/') and len(raw) > 2 and raw[2] == ':':
+        raw = raw[1:]
+    return Path(raw)
+
+
+async def _resolve_roots(server) -> list[RootConfig] | None:
+    """Try to get IDE roots via MCP list_roots. Caches result. Never raises."""
+    global _resolved_roots, _roots_probe_failed
+    if _resolved_roots is not None:
+        return _resolved_roots
+    if _roots_probe_failed:
+        return None
+    try:
+        ctx = server.request_context
+        session = ctx.session
+        res = await session.list_roots()
+        roots = []
+        for r in res.roots:
+            p = _uri_to_path(str(r.uri))
+            if p and p.exists() and p.is_dir():
+                roots.append(RootConfig(path=p))
+        if roots:
+            _resolved_roots = roots
+            return roots
+    except LookupError:
+        logger.warning("list_roots: called outside request context")
+    except Exception as e:
+        logger.warning("list_roots probe failed: %s: %s", type(e).__name__, e)
+    _roots_probe_failed = True
+    return None
 
 
 def _format_select_result(rows: list[dict]) -> str:
@@ -73,9 +125,8 @@ def _format_select_result(rows: list[dict]) -> str:
         out.append('')
     return '\n'.join(out)
 
+
 logger = logging.getLogger(__name__)
-
-
 
 
 def _build_server() -> Server:
@@ -121,11 +172,24 @@ def _build_server() -> Server:
                     "required": ["sql"],
                 },
             ),
+            types.Tool(
+                name="md_debug",
+                description=MD_DEBUG_DESCRIPTION,
+                inputSchema={
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                },
+            ),
         ]
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         global _conn, _watcher
+
+        # Debug tool — no root needed
+        if name == "md_debug":
+            return await _handle_debug(server)
 
         sql = arguments.get("sql", "")
         root_path = arguments.get("root_path")
@@ -143,6 +207,9 @@ def _build_server() -> Server:
                     type="text",
                     text=f"Error: root_path must be a directory: {root_path}",
                 )]
+            # Stop the old watcher before replacing it
+            if _watcher:
+                _watcher.stop()
             cfg = RootConfig(path=path)
             _conn = get_connection()
             load_files(_conn, [cfg])
@@ -150,13 +217,85 @@ def _build_server() -> Server:
             _watcher.start([cfg])
             return await _handle_call_tool(name, arguments)
 
-        # Fallback: pre-loaded DOC_ROOTS
-        if _conn is not None:
-            return await _handle_call_tool(name, arguments)
+        # Auto-resolve roots (list_roots → DOC_ROOTS)
+        if _conn is None:
+            roots = await _resolve_roots(server) or get_doc_roots()
+            if roots:
+                _conn = get_connection()
+                load_files(_conn, roots)
+                _watcher = FileWatcher(_conn)
+                _watcher.start(roots)
+                logger.info("Auto-resolved %d root(s)", len(roots))
 
-        return [types.TextContent(type="text", text="Error: no document roots available. Use root_path or configure DOC_ROOTS.")]
+        if _conn is None:
+            return [types.TextContent(
+                type="text",
+                text="Error: no document roots available. Use root_path or configure DOC_ROOTS.",
+            )]
+
+        return await _handle_call_tool(name, arguments)
 
     return server
+
+
+async def _handle_debug(server) -> list[types.TextContent]:
+    """Collect diagnostics and return as JSON."""
+    _watcher_alive = (
+        _watcher is not None
+        and hasattr(_watcher, 'observer')
+        and getattr(_watcher.observer, 'is_alive', lambda: False)()
+    )
+
+    info = {
+        "server": {
+            "conn_loaded": _conn is not None,
+            "watcher_running": _watcher_alive,
+            "resolved_roots_cache": [str(r.path) for r in _resolved_roots] if _resolved_roots else None,
+            "roots_probe_failed": _roots_probe_failed,
+        },
+        "env": {
+            "DOC_ROOTS_raw": os.environ.get("DOC_ROOTS", ""),
+            "DOC_ROOTS_parsed": [str(r.path) for r in get_doc_roots()],
+            "cwd": str(Path.cwd()),
+        },
+        "db": None,
+        "client_capabilities": None,
+        "list_roots_probe": None,
+    }
+
+    # DB stats
+    if _conn is not None:
+        try:
+            count = _conn.execute("SELECT COUNT(*) FROM md").fetchone()[0]
+            roots_db = [row[0] for row in _conn.execute("SELECT DISTINCT root FROM md").fetchall()]
+            info["db"] = {"md_count": count, "distinct_roots": roots_db}
+        except Exception as e:
+            info["db"] = {"error": f"{type(e).__name__}: {e}"}
+
+    # Client capabilities + list_roots probe
+    if server is not None:
+        try:
+            ctx = server.request_context
+            session = ctx.session
+            caps = session.client_params.capabilities if session.client_params else None
+            if caps:
+                info["client_capabilities"] = caps.model_dump(mode="json", exclude_none=True)
+            else:
+                info["client_capabilities"] = None
+
+            # Live list_roots probe
+            try:
+                res = await session.list_roots()
+                info["list_roots_probe"] = res.model_dump(mode="json", exclude_none=True)
+            except Exception as e:
+                info["list_roots_probe"] = {"error": f"{type(e).__name__}: {e}"}
+        except LookupError:
+            info["client_capabilities"] = "LookupError — called outside request context"
+        except Exception as e:
+            info["client_capabilities"] = {"error": f"{type(e).__name__}: {e}"}
+
+    payload = json.dumps(info, ensure_ascii=False, indent=2, default=str)
+    return [types.TextContent(type="text", text=payload)]
 
 
 async def _handle_call_tool(name: str, arguments: dict) -> list[types.TextContent]:

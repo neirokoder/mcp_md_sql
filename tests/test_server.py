@@ -247,4 +247,115 @@ async def test_unknown_tool():
 # ── tests for new resolution logic ─────────────────────────────────────────────
 
 
+# ── _uri_to_path ────────────────────────────────────────────────────────────
+
+
+class TestUriToPath:
+    def test_file_uri_windows(self):
+        p = srv._uri_to_path("file:///C:/project/docs")
+        assert p == Path("C:/project/docs")
+
+    def test_file_uri_percent_encoded(self):
+        p = srv._uri_to_path("file:///C%3A/project")
+        assert p == Path("C:/project")
+
+    def test_file_uri_unix(self):
+        p = srv._uri_to_path("file:///home/user/docs")
+        assert p == Path("/home/user/docs")
+
+    def test_non_file_scheme(self):
+        assert srv._uri_to_path("https://example.com") is None
+
+    def test_invalid_uri_does_not_crash(self):
+        p = srv._uri_to_path("not a uri")
+        assert p is None  # non-file scheme returns None
+
+
+# ── _resolve_roots ──────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_resolve_roots_no_context():
+    """_resolve_roots без request context (None server) → None, флаг failed."""
+    srv._resolved_roots = None
+    srv._roots_probe_failed = False
+    result = await srv._resolve_roots(None)
+    assert result is None
+    assert srv._roots_probe_failed is True
+
+
+@pytest.mark.asyncio
+async def test_resolve_roots_cached():
+    """Второй вызов возвращает кэшированное значение."""
+    srv._resolved_roots = [RootConfig(path=Path("/cached"))]
+    srv._roots_probe_failed = False
+    result = await srv._resolve_roots(None)
+    assert result is not None
+    assert result[0].path == Path("/cached")
+
+
+@pytest.mark.asyncio
+async def test_resolve_roots_failed_flag():
+    """Если флаг _roots_probe_failed — сразу None."""
+    srv._resolved_roots = None
+    srv._roots_probe_failed = True
+    result = await srv._resolve_roots(None)
+    assert result is None
+
+
+# ── _handle_debug ───────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_handle_debug_no_conn():
+    """_handle_debug без загруженной БД — возвращает JSON без падения."""
+    srv._resolved_roots = None
+    srv._roots_probe_failed = False
+    saved = srv._conn
+    srv._conn = None
+    try:
+        result = await srv._handle_debug(None)
+        text = result[0].text
+        assert '"conn_loaded": false' in text
+        assert '"db": null' in text or '"db": None' in text
+        assert 'no error' not in text.lower()  # нет сырых исключений
+    finally:
+        srv._conn = saved
+
+
+@pytest.mark.asyncio
+async def test_handle_debug_with_db():
+    """_handle_debug с загруженной БД — показывает md_count и distinct_roots."""
+    import tempfile
+    root = Path(tempfile.mkdtemp())
+    docs = root / "docs"
+    docs.mkdir()
+    (docs / "readme.md").write_text("# Test\n\nHello.\n", encoding='utf-8')
+
+    saved = srv._conn
+    srv._conn = None
+    try:
+        cfg = RootConfig(path=root)
+        conn = get_connection()
+        load_files(conn, [cfg])
+        srv._conn = conn
+
+        result = await srv._handle_debug(None)
+        text = result[0].text
+        assert '"conn_loaded": true' in text
+        assert '"md_count"' in text
+        assert '"distinct_roots"' in text
+    finally:
+        srv._conn = saved
+
+
+@pytest.mark.asyncio
+async def test_handle_debug_no_server():
+    """server=None — клиентские разделы пропущены, не падает."""
+    result = await srv._handle_debug(None)
+    text = result[0].text
+    # Без server: client_capabilities и list_roots_probe остаются null
+    assert '"client_capabilities": null' in text
+    assert '"list_roots_probe": null' in text
+
 

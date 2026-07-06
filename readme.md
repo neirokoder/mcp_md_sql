@@ -59,12 +59,14 @@ DOC_ROOTS="docs=./docs;specs=./specifications"
 
 ## MCP-инструменты
 
-Корни документации определяются на каждый вызов инструмента:
-1. **IDE roots** — запрос `session.list_roots()` при каждом `md_select`/`md_change`
-2. Если IDE не вернула корни — из SQL (`WHERE root = 'alias'`) ищется существующая БД
-3. Fallback — `DOC_ROOTS` из env или текущая директория
+Корни документации разрешаются **lazy** при первом вызове (на всю жизнь инстанса):
+1. **IDE roots** — MCP `session.list_roots()` (один раз, кэшируется)
+2. Fallback — `DOC_ROOTS` из env
+3. Error — если ни один источник не дал корней
 
-Каждый уникальный root alias получает **отдельную in-memory SQLite БД**.
+Параметр `root_path` опционален — используется только для override корня на конкретный вызов.
+
+Инстанс MCP локальный для проекта → одна in-memory SQLite БД на весь lifecycle.
 
 ### `md_select`
 
@@ -84,6 +86,17 @@ SELECT * FROM md WHERE type = 'heading' AND depth = 0
 - Прямое изменение `id` запрещено
 - Multi-statement в SELECT запрещены
 - Таймаут SQL-запроса: 15 секунд
+
+### `md_debug`
+
+Диагностический инструмент (временный). Без параметров. Возвращает JSON с:
+- состояние `_conn`/watcher
+- env (`DOC_ROOTS`, CWD)
+- статистика БД (если загружена)
+- клиентские capabilities (есть ли `roots`)
+- результат `list_roots()` probe
+
+Используется для отладки разрешения корней.
 
 ## Таблица `md`
 
