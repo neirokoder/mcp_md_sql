@@ -14,41 +14,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .config import RootConfig, get_doc_roots
 from .database import reload_file
 from .reconstructor import render_single
 
 logger = logging.getLogger(__name__)
-
-
-# Per-root config registry (set by server.py when creating per-root DBs)
-_root_configs: dict[str, RootConfig] = {}
-
-
-def set_root_config(cfg: RootConfig) -> None:
-    """Register a root config for path lookup."""
-    _root_configs[str(cfg.path)] = cfg  # register by full path
-
-
-def clear_root_configs() -> None:
-    """Clear all registered root configs (used in tests)."""
-    _root_configs.clear()
-
-
-def get_root_path(root_val: str) -> Path:
-    """Find the filesystem path for a root identifier.
-
-    Accepts the full absolute path.
-    """
-    # First: check _root_configs cache (registered by full path)
-    if root_val in _root_configs:
-        return _root_configs[root_val].path
-    # Fallback: check get_doc_roots by full path
-    for cfg in get_doc_roots():
-        if str(cfg.path) == root_val:
-            _root_configs[root_val] = cfg  # update cache
-            return cfg.path
-    raise ToolError(f"Unknown root: {root_val}")
 
 TIMEOUT_SEC = 15
 FORBIDDEN_DDL = re.compile(
@@ -406,7 +375,7 @@ def _patch_file_insert(conn: sqlite3.Connection, root: str, file: str,
 
     After writing, verifies that file size and surrounding lines are intact.
     """
-    root_path = get_root_path(root)
+    root_path = Path(root)
     full_path = root_path / file
     if not full_path.exists():
         raise ToolError(f"File does not exist: {full_path}")
@@ -629,7 +598,7 @@ def _patch_file_update(conn: sqlite3.Connection, root: str, file: str,
 
     Returns list of (row_id, line_start, line_end, new_text) for DB sync.
     """
-    root_path = get_root_path(root)
+    root_path = Path(root)
     full_path = root_path / file
     if not full_path.exists():
         raise ToolError(f"File does not exist: {full_path}")
@@ -855,7 +824,7 @@ def _handle_delete(conn: sqlite3.Connection, sql: str) -> dict[str, Any]:
 
 def _patch_file_delete(root: str, file: str, deleted_rows: list[dict]) -> None:
     """Remove lines for deleted block elements from the file."""
-    root_path = get_root_path(root)
+    root_path = Path(root)
     full_path = root_path / file
     if not full_path.exists():
         raise ToolError(f"File does not exist: {full_path}")
@@ -883,7 +852,7 @@ def _patch_file_inline_deletes(conn: sqlite3.Connection, root: str, file: str,
     For each inline element being deleted, find its parent's source lines,
     remove the inline markup, and write the updated parent source back.
     """
-    root_path = get_root_path(root)
+    root_path = Path(root)
     full_path = root_path / file
     if not full_path.exists():
         raise ToolError(f"File does not exist: {full_path}")
@@ -964,7 +933,7 @@ def _collect_inline_patch(source_lines: list[str], deleted_row: dict,
 
 def _reload_after_write(conn: sqlite3.Connection, root: str, file: str) -> None:
     """Reload a file into the database after writing to it."""
-    root_path = get_root_path(root)
+    root_path = Path(root)
     reload_file(conn, root, file, root_path)
 
 
@@ -1013,7 +982,7 @@ def _reload_preserve_ids(conn: sqlite3.Connection, root: str, file: str) -> None
         key = (r['type'], r['content'])
         old_by_key[key].append(r['id'])
 
-    root_path = get_root_path(root)
+    root_path = Path(root)
     reload_file(conn, root, file, root_path)
 
     new_rows = conn.execute(

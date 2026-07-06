@@ -7,21 +7,23 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import sqlite3
-from dataclasses import dataclass, field
 from pathlib import Path
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 import mcp.types as types
 
-from .config import RootConfig, get_doc_roots, set_roots
+from .config import RootConfig, get_doc_roots
 from .database import get_connection, load_files
 from .descriptions import MD_SELECT_DESCRIPTION, MD_CHANGE_DESCRIPTION, SQL_SELECT_DESC, SQL_CHANGE_DESC, ROOT_PATH_DESC
-from .tools import md_select, md_change, ToolError, set_root_config
+from .tools import md_select, md_change, ToolError
 from .watcher import FileWatcher
 
+
+# Global state — single connection and watcher shared across tool calls
+_conn: sqlite3.Connection | None = None
+_watcher: FileWatcher | None = None
 
 
 STANDARD_COLS = {'root', 'file', 'line_start', 'line_end', 'pos_in_file',
@@ -74,110 +76,10 @@ def _format_select_result(rows: list[dict]) -> str:
 logger = logging.getLogger(__name__)
 
 
-@dataclass
-class _ServerState:
-    """Per-instance state — isolated between server instances in the same process."""
-    databases: dict[str, sqlite3.Connection] = field(default_factory=dict)
-    watchers: dict[str, FileWatcher] = field(default_factory=dict)
-    session: types.Session | None = None
-
-    def get_or_create_db(self, root_cfg: RootConfig) -> sqlite3.Connection:
-        """Get existing database for a root or create a new one with loaded files."""
-        key = str(root_cfg.path)
-        if key in self.databases:
-            return self.databases[key]
-
-        conn = get_connection()
-        count = load_files(conn, [root_cfg])
-        self.databases[key] = conn
-        set_root_config(root_cfg)
-        logger.info("Created DB for root '%s' — loaded %d rows", key, count)
-
-        w = FileWatcher(conn)
-        w.start([root_cfg])
-        self.watchers[key] = w
-
-        return conn
-
-    def resolve_connection(self, sql: str,
-                           ide_roots: list[RootConfig] | None) -> sqlite3.Connection | None:
-        """Resolve which database connection to use for a tool call.
-
-        Priority:
-        1. IDE roots (first root's alias)
-        2. root alias extracted from SQL WHERE clause → match in existing DBs
-        3. Single pre-loaded root (DOC_ROOTS) — only when exactly one
-        """
-        # Priority 1: IDE roots
-        if ide_roots:
-            return self.get_or_create_db(ide_roots[0])
-
-        # Priority 2: extract root from SQL and search existing DBs
-        alias = _extract_root_from_sql(sql)
-        if alias:
-            if alias in self.databases:
-                return self.databases[alias]
-            # Containment match
-            for a, conn in self.databases.items():
-                if alias in a or a in alias:
-                    logger.info("Matched root '%s' to existing DB '%s'", alias, a)
-                    return self.databases[a]
-
-        # Priority 3: single pre-loaded root (from DOC_ROOTS, not a fallback)
-        if len(self.databases) == 1:
-            return next(iter(self.databases.values()))
-
-        logger.error("No document roots available")
-        return None
-
-    def stop_watchers(self) -> None:
-        """Stop all file watchers."""
-        for w in self.watchers.values():
-            w.stop()
-        self.watchers.clear()
-        self.databases.clear()
 
 
-def _extract_root_from_sql(sql: str) -> str | None:
-    """Extract root alias from WHERE root = '...' clause."""
-    m = re.search(r"""WHERE\s+root\s*=\s*['"]([^'"]+)['"]""", sql, re.IGNORECASE)
-    if m:
-        return m.group(1)
-    return None
-
-
-async def _try_load_roots(session) -> list[RootConfig] | None:
-    """Request roots from IDE via MCP protocol, return None if not available."""
-    try:
-        import asyncio
-        from urllib.parse import urlparse
-        from urllib.request import url2pathname
-
-        logger.info("Requesting roots from IDE...")
-        result = await asyncio.wait_for(session.list_roots(), timeout=2.0)
-        if not result.roots:
-            logger.error("IDE returned no roots")
-            return None
-        roots = []
-        for r in result.roots:
-            uri = urlparse(str(r.uri))
-            if uri.scheme == 'file':
-                path = Path(url2pathname(uri.path))
-            else:
-                path = Path(str(r.uri))
-            roots.append(RootConfig(path=path.resolve()))
-        logger.info("Got %d root(s) from IDE: %s", len(roots), [r.path for r in roots])
-        return roots
-    except asyncio.TimeoutError:
-        logger.warning("IDE did not respond to roots/list request within 2s")
-        return None
-    except Exception as e:
-        logger.warning("Failed to get roots from IDE: %s", e)
-        return None
-
-
-def _build_server(state: _ServerState) -> Server:
-    """Create the MCP server with tool registrations. State is captured in closures."""
+def _build_server() -> Server:
+    """Create the MCP server with tool registrations."""
     server = Server("md-sql")
 
     @server.list_tools()
@@ -223,10 +125,12 @@ def _build_server(state: _ServerState) -> Server:
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
+        global _conn, _watcher
+
         sql = arguments.get("sql", "")
         root_path = arguments.get("root_path")
 
-        # Priority 0: explicit root_path (like codegraph_explore's projectPath)
+        # Priority: explicit root_path
         if root_path:
             path = Path(root_path).resolve()
             if not path.exists():
@@ -240,39 +144,36 @@ def _build_server(state: _ServerState) -> Server:
                     text=f"Error: root_path must be a directory: {root_path}",
                 )]
             cfg = RootConfig(path=path)
-            conn = state.get_or_create_db(cfg)
-            return await _handle_call_tool(name, arguments, conn, state)
+            _conn = get_connection()
+            load_files(_conn, [cfg])
+            _watcher = FileWatcher(_conn)
+            _watcher.start([cfg])
+            return await _handle_call_tool(name, arguments)
 
-        # Always request roots from IDE on every tool call
-        ide_roots = None
-        try:
-            state.session = server.request_context.session
-            ide_roots = await _try_load_roots(state.session)
-        except (LookupError, Exception) as e:
-            logger.warning("call_tool: could not request IDE roots: %s", e)
+        # Fallback: pre-loaded DOC_ROOTS
+        if _conn is not None:
+            return await _handle_call_tool(name, arguments)
 
-        # Resolve which connection to use (priorities 1-3)
-        conn = state.resolve_connection(sql, ide_roots)
-        if conn is None:
-            return [types.TextContent(type="text", text="Error: no document roots available")]
-
-        return await _handle_call_tool(name, arguments, conn, state)
+        return [types.TextContent(type="text", text="Error: no document roots available. Use root_path or configure DOC_ROOTS.")]
 
     return server
 
 
-async def _handle_call_tool(name: str, arguments: dict,
-                            conn: sqlite3.Connection,
-                            state: _ServerState | None = None) -> list[types.TextContent]:
-    """Tool dispatch logic."""
+async def _handle_call_tool(name: str, arguments: dict) -> list[types.TextContent]:
+    """Tool dispatch logic. Uses global _conn and _watcher."""
+    global _conn, _watcher
+
     sql = arguments.get("sql", "")
     if not sql:
         return [types.TextContent(type="text", text="Error: 'sql' parameter is required")]
 
+    if _conn is None:
+        return [types.TextContent(type="text", text="Error: no document root loaded")]
+
     try:
         if name == "md_select":
             logger.info("md_select: %.200s", sql)
-            rows = md_select(conn, sql)
+            rows = md_select(_conn, sql)
             result = _format_select_result(rows)
             if not rows:
                 result = "(no results)"
@@ -280,14 +181,12 @@ async def _handle_call_tool(name: str, arguments: dict,
 
         elif name == "md_change":
             logger.info("md_change: %.200s", sql)
-            result = md_change(conn, sql)
+            result = md_change(_conn, sql)
             # Notify watcher to ignore the files we just wrote
-            if state:
+            if _watcher:
                 for key in result.get("files_changed", []):
                     r, f = key.rsplit(":", 1)
-                    watcher = state.watchers.get(r)
-                    if watcher:
-                        watcher.ignore_path(r, f)
+                    _watcher.ignore_path(r, f)
             result_json = json.dumps(result, ensure_ascii=False, indent=2)
             return [types.TextContent(type="text", text=result_json)]
 
@@ -304,24 +203,25 @@ async def _handle_call_tool(name: str, arguments: dict,
 async def run_server() -> None:
     """Initialize resources and start the MCP server.
 
-    Pre-loads static roots (DOC_ROOTS) — if set — so the server is usable
-    even without IDE support. IDE roots are requested on every tool call.
-    root_path parameter takes highest priority.
+    Pre-loads DOC_ROOTS — if set — into the global connection.
+    root_path in tool call takes highest priority.
     """
+    global _conn, _watcher
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
 
-    state = _ServerState()
-
-    # Pre-load static roots so server is usable immediately
     static = get_doc_roots()
-    for root_cfg in static:
-        state.get_or_create_db(root_cfg)
-    logger.info("Pre-loaded %d static root(s)", len(static))
+    if static:
+        _conn = get_connection()
+        load_files(_conn, static)
+        _watcher = FileWatcher(_conn)
+        _watcher.start(static)
+        logger.info("Pre-loaded %d static root(s)", len(static))
 
-    server = _build_server(state)
+    server = _build_server()
 
     try:
         async with stdio_server() as (read_stream, write_stream):
@@ -331,7 +231,8 @@ async def run_server() -> None:
                 server.create_initialization_options(),
             )
     finally:
-        state.stop_watchers()
+        if _watcher:
+            _watcher.stop()
 
 
 def main() -> None:
