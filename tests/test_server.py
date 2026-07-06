@@ -303,59 +303,54 @@ async def test_resolve_roots_failed_flag():
     assert result is None
 
 
-# ── _handle_debug ───────────────────────────────────────────────────────────
+# ── _handle_initialize ──────────────────────────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_handle_debug_no_conn():
-    """_handle_debug без загруженной БД — возвращает JSON без падения."""
-    srv._resolved_roots = None
-    srv._roots_probe_failed = False
-    saved = srv._conn
-    srv._conn = None
-    try:
-        result = await srv._handle_debug(None)
-        text = result[0].text
-        assert '"conn_loaded": false' in text
-        assert '"db": null' in text or '"db": None' in text
-        assert 'no error' not in text.lower()  # нет сырых исключений
-    finally:
-        srv._conn = saved
-
-
-@pytest.mark.asyncio
-async def test_handle_debug_with_db():
-    """_handle_debug с загруженной БД — показывает md_count и distinct_roots."""
-    import tempfile
-    root = Path(tempfile.mkdtemp())
-    docs = root / "docs"
-    docs.mkdir()
-    (docs / "readme.md").write_text("# Test\n\nHello.\n", encoding='utf-8')
-
-    saved = srv._conn
-    srv._conn = None
-    try:
-        cfg = RootConfig(path=root)
-        conn = get_connection()
-        load_files(conn, [cfg])
-        srv._conn = conn
-
-        result = await srv._handle_debug(None)
-        text = result[0].text
-        assert '"conn_loaded": true' in text
-        assert '"md_count"' in text
-        assert '"distinct_roots"' in text
-    finally:
-        srv._conn = saved
-
-
-@pytest.mark.asyncio
-async def test_handle_debug_no_server():
-    """server=None — клиентские разделы пропущены, не падает."""
-    result = await srv._handle_debug(None)
+async def test_handle_initialize_missing_root():
+    """Без root — ошибка."""
+    result = await srv._handle_initialize(None, {})
     text = result[0].text
-    # Без server: client_capabilities и list_roots_probe остаются null
-    assert '"client_capabilities": null' in text
-    assert '"list_roots_probe": null' in text
+    assert "Error" in text
+    assert "root" in text.lower()
+
+
+@pytest.mark.asyncio
+async def test_handle_initialize_bad_root():
+    """Несуществующий root — ошибка."""
+    result = await srv._handle_initialize(None, {"root": "/nonexistent/path"})
+    text = result[0].text
+    assert "Error" in text
+    assert "does not exist" in text
+
+
+@pytest.mark.asyncio
+async def test_handle_initialize_success():
+    """Успешная инициализация — возвращает диагностику с count и статусами."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        docs = root / "docs"
+        docs.mkdir()
+        (docs / "readme.md").write_text("# Test\n\nHello.\n", encoding='utf-8')
+
+        saved = srv._conn
+        saved_watcher = srv._watcher
+        srv._conn = None
+        srv._watcher = None
+        try:
+            result = await srv._handle_initialize(None, {"root": str(docs)})
+            text = result[0].text
+            assert '"status": "ok"' in text
+            assert '"md_count"' in text
+            assert '"files_count"' in text
+            assert '"conn_loaded": true' in text
+            assert '"watcher_running": true' in text
+            assert '"distinct_roots"' in text
+            assert srv._conn is not None
+        finally:
+            if srv._watcher and srv._watcher is not saved_watcher:
+                srv._watcher.stop()
+            srv._conn = saved
+            srv._watcher = saved_watcher
 
 

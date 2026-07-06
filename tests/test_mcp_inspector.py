@@ -263,7 +263,7 @@ async def test_no_roots_error(no_roots_server: StdioServerParameters):
             r = await session.call_tool("md_select", {
                 "sql": "SELECT content FROM md WHERE type='heading'",
             })
-            assert "no document roots" in "".join(c.text for c in r.content).lower()
+            assert "md_initialize" in "".join(c.text for c in r.content).lower()
 
 
 @pytest.mark.asyncio

@@ -24,8 +24,8 @@ from .descriptions import (
     MD_CHANGE_DESCRIPTION,
     SQL_SELECT_DESC,
     SQL_CHANGE_DESC,
-    ROOT_PATH_DESC,
-    MD_DEBUG_DESCRIPTION,
+    ROOT_DESC,
+    MD_INITIALIZE_DESCRIPTION,
 )
 from .tools import md_select, md_change, ToolError
 from .watcher import FileWatcher
@@ -162,6 +162,20 @@ def _build_server() -> Server:
     async def list_tools() -> list[types.Tool]:
         return [
             types.Tool(
+                name="md_initialize",
+                description=MD_INITIALIZE_DESCRIPTION,
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "root": {
+                            "type": "string",
+                            "description": ROOT_DESC,
+                        },
+                    },
+                    "required": ["root"],
+                },
+            ),
+            types.Tool(
                 name="md_select",
                 description=MD_SELECT_DESCRIPTION,
                 inputSchema={
@@ -170,10 +184,6 @@ def _build_server() -> Server:
                         "sql": {
                             "type": "string",
                             "description": SQL_SELECT_DESC,
-                        },
-                        "root_path": {
-                            "type": "string",
-                            "description": ROOT_PATH_DESC,
                         },
                     },
                     "required": ["sql"],
@@ -189,21 +199,8 @@ def _build_server() -> Server:
                             "type": "string",
                             "description": SQL_CHANGE_DESC,
                         },
-                        "root_path": {
-                            "type": "string",
-                            "description": ROOT_PATH_DESC,
-                        },
                     },
                     "required": ["sql"],
-                },
-            ),
-            types.Tool(
-                name="md_debug",
-                description=MD_DEBUG_DESCRIPTION,
-                inputSchema={
-                    "type": "object",
-                    "properties": {},
-                    "required": [],
                 },
             ),
         ]
@@ -212,50 +209,14 @@ def _build_server() -> Server:
     async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         global _conn, _watcher
 
-        # Debug tool — no root needed
-        if name == "md_debug":
-            return await _handle_debug(server)
+        if name == "md_initialize":
+            return await _handle_initialize(server, arguments)
 
-        sql = arguments.get("sql", "")
-        root_path = arguments.get("root_path")
-
-        # Priority: explicit root_path
-        if root_path:
-            path = Path(root_path).resolve()
-            if not path.exists():
-                return [types.TextContent(
-                    type="text",
-                    text=f"Error: root_path does not exist: {root_path}",
-                )]
-            if not path.is_dir():
-                return [types.TextContent(
-                    type="text",
-                    text=f"Error: root_path must be a directory: {root_path}",
-                )]
-            # Stop the old watcher before replacing it
-            if _watcher:
-                _watcher.stop()
-            cfg = RootConfig(path=path)
-            _conn = get_connection()
-            load_files(_conn, [cfg])
-            _watcher = FileWatcher(_conn)
-            _watcher.start([cfg])
-            return await _handle_call_tool(name, arguments)
-
-        # Auto-resolve roots: init handler cache → DOC_ROOTS
-        if _conn is None:
-            roots = _resolved_roots or get_doc_roots()
-            if roots:
-                _conn = get_connection()
-                load_files(_conn, roots)
-                _watcher = FileWatcher(_conn)
-                _watcher.start(roots)
-                logger.info("Auto-resolved %d root(s)", len(roots))
-
+        # md_select / md_change — require initialized state
         if _conn is None:
             return [types.TextContent(
                 type="text",
-                text="Error: no document roots available. Use root_path or configure DOC_ROOTS.",
+                text="Error: no document root loaded. Call md_initialize(root=...) first.",
             )]
 
         return await _handle_call_tool(name, arguments)
@@ -263,8 +224,43 @@ def _build_server() -> Server:
     return server
 
 
-async def _handle_debug(server) -> list[types.TextContent]:
-    """Collect diagnostics and return as JSON."""
+async def _handle_initialize(server, arguments: dict) -> list[types.TextContent]:
+    """Initialize DB with root, index files, start watcher. Return diagnostics."""
+    global _conn, _watcher
+
+    root = arguments.get("root", "").strip()
+    if not root:
+        return [types.TextContent(
+            type="text",
+            text="Error: 'root' parameter is required",
+        )]
+
+    path = Path(root).resolve()
+    if not path.exists():
+        return [types.TextContent(
+            type="text",
+            text=f"Error: root does not exist: {root}",
+        )]
+    if not path.is_dir():
+        return [types.TextContent(
+            type="text",
+            text=f"Error: root must be a directory: {root}",
+        )]
+
+    # Stop old watcher before replacing
+    if _watcher:
+        _watcher.stop()
+
+    cfg = RootConfig(path=path)
+    _conn = get_connection()
+    load_files(_conn, [cfg])
+    _watcher = FileWatcher(_conn)
+    _watcher.start([cfg])
+
+    count = _conn.execute("SELECT COUNT(*) FROM md").fetchone()[0]
+    files_count = _conn.execute("SELECT COUNT(DISTINCT file) FROM md").fetchone()[0]
+
+    # Build diagnostics
     _watcher_alive = (
         _watcher is not None
         and hasattr(_watcher, 'observer')
@@ -272,57 +268,23 @@ async def _handle_debug(server) -> list[types.TextContent]:
     )
 
     info = {
-        "server": {
-            "conn_loaded": _conn is not None,
-            "watcher_running": _watcher_alive,
-            "resolved_roots_cache": [str(r.path) for r in _resolved_roots] if _resolved_roots else None,
-            "roots_probe_failed": _roots_probe_failed,
-        },
-        "env": {
-            "DOC_ROOTS_raw": os.environ.get("DOC_ROOTS", ""),
-            "DOC_ROOTS_parsed": [str(r.path) for r in get_doc_roots()],
-            "cwd": str(Path.cwd()),
-        },
-        "db": None,
-        "client_capabilities": None,
-        "list_roots_probe": None,
+        "status": "ok",
+        "root": str(path),
+        "md_count": count,
+        "files_count": files_count,
+        "distinct_roots": [
+            row[0] for row in _conn.execute("SELECT DISTINCT root FROM md").fetchall()
+        ],
+        "conn_loaded": _conn is not None,
+        "watcher_running": _watcher_alive,
     }
 
-    # DB stats
-    if _conn is not None:
-        try:
-            count = _conn.execute("SELECT COUNT(*) FROM md").fetchone()[0]
-            roots_db = [row[0] for row in _conn.execute("SELECT DISTINCT root FROM md").fetchall()]
-            info["db"] = {"md_count": count, "distinct_roots": roots_db}
-        except Exception as e:
-            info["db"] = {"error": f"{type(e).__name__}: {e}"}
-
-    # Client capabilities + list_roots probe
-    if server is not None:
-        try:
-            ctx = server.request_context
-            session = ctx.session
-            caps = session.client_params.capabilities if session.client_params else None
-            if caps:
-                info["client_capabilities"] = caps.model_dump(mode="json", exclude_none=True)
-            else:
-                info["client_capabilities"] = None
-
-            # Live list_roots probe (only if client declared capability)
-            if caps is not None and caps.roots is not None:
-                try:
-                    res = await asyncio.wait_for(session.list_roots(), timeout=3)
-                    info["list_roots_probe"] = res.model_dump(mode="json", exclude_none=True)
-                except asyncio.TimeoutError:
-                    info["list_roots_probe"] = {"error": "TimeoutError: list_roots timed out after 3s"}
-                except Exception as e:
-                    info["list_roots_probe"] = {"error": f"{type(e).__name__}: {e}"}
-            else:
-                info["list_roots_probe"] = {"status": "client did not declare roots capability"}
-        except LookupError:
-            info["client_capabilities"] = "LookupError — called outside request context"
-        except Exception as e:
-            info["client_capabilities"] = {"error": f"{type(e).__name__}: {e}"}
+    # Add env diagnostics
+    info["env"] = {
+        "DOC_ROOTS_raw": os.environ.get("DOC_ROOTS", ""),
+        "DOC_ROOTS_parsed": [str(r.path) for r in get_doc_roots()],
+        "cwd": str(Path.cwd()),
+    }
 
     payload = json.dumps(info, ensure_ascii=False, indent=2, default=str)
     return [types.TextContent(type="text", text=payload)]
@@ -337,7 +299,7 @@ async def _handle_call_tool(name: str, arguments: dict) -> list[types.TextConten
         return [types.TextContent(type="text", text="Error: 'sql' parameter is required")]
 
     if _conn is None:
-        return [types.TextContent(type="text", text="Error: no document root loaded")]
+        return [types.TextContent(type="text", text="Error: no document root loaded. Call md_initialize(root=...) first.")]
 
     try:
         if name == "md_select":
@@ -372,8 +334,8 @@ async def _handle_call_tool(name: str, arguments: dict) -> list[types.TextConten
 async def run_server() -> None:
     """Initialize resources and start the MCP server.
 
-    Pre-loads DOC_ROOTS — if set — into the global connection.
-    root_path in tool call takes highest priority.
+    If DOC_ROOTS is set, pre-loads it into the global connection
+    so md_initialize is optional (data is already warm at start).
     """
     global _conn, _watcher
 
