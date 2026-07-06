@@ -5,6 +5,7 @@ Registers `md_select` and `md_change` tools against per-root in-memory SQLite da
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -56,29 +57,19 @@ def _uri_to_path(uri: str) -> Path | None:
 
 
 async def _resolve_roots(server) -> list[RootConfig] | None:
-    """Try to get IDE roots via MCP list_roots. Caches result. Never raises."""
+    """Return cached roots from init handler or fallback.
+
+    Never calls list_roots itself — that would deadlock (client
+    awaits CallToolResult). Roots are fetched by the
+    InitializedNotification handler, which runs when the client
+    is NOT waiting for a response.
+    """
     global _resolved_roots, _roots_probe_failed
     if _resolved_roots is not None:
         return _resolved_roots
     if _roots_probe_failed:
         return None
-    try:
-        ctx = server.request_context
-        session = ctx.session
-        res = await session.list_roots()
-        roots = []
-        for r in res.roots:
-            p = _uri_to_path(str(r.uri))
-            if p and p.exists() and p.is_dir():
-                roots.append(RootConfig(path=p))
-        if roots:
-            _resolved_roots = roots
-            return roots
-    except LookupError:
-        logger.warning("list_roots: called outside request context")
-    except Exception as e:
-        logger.warning("list_roots probe failed: %s: %s", type(e).__name__, e)
-    _roots_probe_failed = True
+    # Not fetched yet — DOC_ROOTS fallback used at call site
     return None
 
 
@@ -132,6 +123,40 @@ logger = logging.getLogger(__name__)
 def _build_server() -> Server:
     """Create the MCP server with tool registrations."""
     server = Server("md-sql")
+
+    # ── Fetch roots from IDE after client initialized ─────────────────────────
+    async def _on_initialized(notif: types.InitializedNotification) -> None:
+        """Called when client sends InitializedNotification.
+
+        At this point the client is NOT waiting for a response,
+        so we can safely call list_roots() without deadlock.
+        """
+        global _resolved_roots, _roots_probe_failed
+        try:
+            ctx = server.request_context
+            session = ctx.session
+            caps = session.client_params.capabilities if session.client_params else None
+            if caps is not None and caps.roots is not None:
+                res = await asyncio.wait_for(session.list_roots(), timeout=5)
+                roots = []
+                for r in res.roots:
+                    p = _uri_to_path(str(r.uri))
+                    if p and p.exists() and p.is_dir():
+                        roots.append(RootConfig(path=p))
+                if roots:
+                    _resolved_roots = roots
+                    logger.info("list_roots (on init): %d root(s)", len(roots))
+                else:
+                    logger.info("list_roots (on init): returned empty")
+            else:
+                logger.info("list_roots (on init): client did not declare roots capability")
+        except asyncio.TimeoutError:
+            logger.warning("list_roots (on init): timed out after 5s")
+        except Exception as e:
+            logger.info("list_roots (on init): %s: %s", type(e).__name__, e)
+            _roots_probe_failed = True
+
+    server.notification_handlers[types.InitializedNotification] = _on_initialized
 
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:
@@ -217,9 +242,9 @@ def _build_server() -> Server:
             _watcher.start([cfg])
             return await _handle_call_tool(name, arguments)
 
-        # Auto-resolve roots (list_roots → DOC_ROOTS)
+        # Auto-resolve roots: init handler cache → DOC_ROOTS
         if _conn is None:
-            roots = await _resolve_roots(server) or get_doc_roots()
+            roots = _resolved_roots or get_doc_roots()
             if roots:
                 _conn = get_connection()
                 load_files(_conn, roots)
@@ -283,10 +308,12 @@ async def _handle_debug(server) -> list[types.TextContent]:
             else:
                 info["client_capabilities"] = None
 
-            # Live list_roots probe
+            # Live list_roots probe (with timeout)
             try:
-                res = await session.list_roots()
+                res = await asyncio.wait_for(session.list_roots(), timeout=3)
                 info["list_roots_probe"] = res.model_dump(mode="json", exclude_none=True)
+            except asyncio.TimeoutError:
+                info["list_roots_probe"] = {"error": "TimeoutError: list_roots timed out after 3s"}
             except Exception as e:
                 info["list_roots_probe"] = {"error": f"{type(e).__name__}: {e}"}
         except LookupError:
@@ -376,7 +403,6 @@ async def run_server() -> None:
 
 def main() -> None:
     """Synchronous entry point."""
-    import asyncio
     asyncio.run(run_server())
 
 
